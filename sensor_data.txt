@@ -1,0 +1,4 @@
+Tempo totale della simulazione: 0.00 
+
+Sensor: Temp
+Time (s)	State
