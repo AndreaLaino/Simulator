@@ -97,20 +97,20 @@ def select_folder():
             display_list.append("• " + f)
 
     file_list_var.set(display_list)
-    messagebox.showinfo("Selected folder", f"You have chosen:\n{folder_path}\nFiles found:\n{files_in_folder}")
+    #messagebox.showinfo("Selected folder", f"You have chosen:\n{folder_path}\nFiles found:\n{files_in_folder}")
 
 def read_timestamp_state_file(file_path: str):
     df = pd.read_csv(file_path, sep=None, engine='python', header=0)
-    required_cols = {"timestamp", "stato"}
+    required_cols = {"time", "state"}
     if not required_cols.issubset(df.columns):
         raise ValueError(f"Requested rows missing {required_cols}")
 
-    df["timestamp"] = pd.to_datetime(df["timestamp"])
-    df = df.sort_values("timestamp")
-    df = df.drop_duplicates(subset=["timestamp"], keep="last")
+    df["time"] = pd.to_datetime(df["time"])
+    df = df.sort_values("time")
+    df = df.drop_duplicates(subset=["time"], keep="last")
 
-    time_str_list = df["timestamp"].dt.strftime("%Y-%m-%d %H:%M:%S").tolist()
-    state_list = pd.to_numeric(df["stato"], errors="coerce").tolist()
+    time_str_list = df["time"].dt.strftime("%Y-%m-%d %H:%M:%S").tolist()
+    state_list = pd.to_numeric(df["state"], errors="coerce").tolist()
     return time_str_list, state_list
 
 def clear_plot_area():
@@ -360,7 +360,7 @@ def export_logs_from_csv():
         else:
             full_index = pd.date_range(ts.index.min(), ts.index.max(), freq="1min")
         ts = ts.reindex(full_index).ffill().reset_index()
-        ts.columns = ["timestamp", "value"]
+        ts.columns = ["time", "value"]
 
         safe_name = f"{subj}_{name}".replace(" ", "_")
         default_name = f"{safe_name}_from_interactions.csv"

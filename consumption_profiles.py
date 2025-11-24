@@ -1,3 +1,4 @@
+#consumption_profiles.py
 from __future__ import annotations
 
 from typing import Dict, Optional
@@ -6,7 +7,6 @@ import pandas as pd
 import smartmeter                      
 from computer_profiles import COMPUTER_PROFILES 
 
-#consumption_profiles.py
 consumption_profiles = {
     "Fridge": {
         "standby": 23, # on the left the value of the minutes, on the right the value of the power consumed
@@ -96,9 +96,8 @@ consumption_profiles = {
 
 _SELECTED_PC_PROFILE_BY_DEVICE: Dict[str, Optional[str]] = {}
 DEVICE_ID_BY_SIM_NAME: Dict[str, str] = {
-    # simulator device name  ->  device_id nel CSV smartmeter
     "pc": "sm_pc",
-    "sm_pc": "sm_pc",   # opzionale ma innocuo
+    "sm_pc": "sm_pc",   
 }
 
 def interpolated_consumption(profile, minutes, standby):
@@ -186,27 +185,13 @@ def get_device_consumption(device_name, device_type, current_timestamp, active_c
         keys = sorted(prof_det)
         return prof_det[keys[0]] if keys else standby
 
+
+#Returns the device_id to look for in smartmeter CSVs.
 def _csv_id_for_device(device_name: str) -> str:
-    """
-    Returns the device_id to look for in smartmeter CSVs.
-    By default it's the same as the simulator device name,
-    unless overridden in DEVICE_ID_BY_SIM_NAME.
-    """
     return DEVICE_ID_BY_SIM_NAME.get(device_name, device_name)
 
-def _csv_id_for_device(device_name: str) -> str:
-    """
-    Returns the device_id to look for in smartmeter CSVs.
-    By default it's the same as the simulator device name,
-    unless overridden in DEVICE_ID_BY_SIM_NAME.
-    """
-    return DEVICE_ID_BY_SIM_NAME.get(device_name, device_name)
-
+#Load all smartmeter CSVs for this device_id and return mean power (W)
 def _real_mean_power_for_device(device_name: str, logs_dir: str = "logs") -> Optional[float]:
-    """
-    Load all smartmeter CSVs for this device_id and return mean power (W).
-    Returns None if no data.
-    """
     csv_id = _csv_id_for_device(device_name)
     df = smartmeter.load_power_by_device_id_any_csv(csv_id, logs_dir=logs_dir)
     if df.empty:
@@ -214,34 +199,7 @@ def _real_mean_power_for_device(device_name: str, logs_dir: str = "logs") -> Opt
     # 'value' column contains power in W
     return float(df["value"].mean())
 
-def _choose_pc_profile_for_device(device_name: str) -> Optional[str]:
-    """
-    Pick the computer profile whose target_mean is closest
-    to the real mean power of this device (from smartmeter logs).
-    Result is cached in _SELECTED_PC_PROFILE_BY_DEVICE.
-    """
-    # already chosen?
-    if device_name in _SELECTED_PC_PROFILE_BY_DEVICE:
-        return _SELECTED_PC_PROFILE_BY_DEVICE[device_name]
-
-    mean_power = _real_mean_power_for_device(device_name)
-    if mean_power is None:
-        _SELECTED_PC_PROFILE_BY_DEVICE[device_name] = None
-        return None
-
-    best_name = None
-    best_delta = None
-
-    for name, prof in COMPUTER_PROFILES.items():
-        target = float(prof.get("target_mean", prof.get("standby", 0.0)))
-        delta = abs(target - mean_power)
-        if best_delta is None or delta < best_delta:
-            best_delta = delta
-            best_name = name
-
-    _SELECTED_PC_PROFILE_BY_DEVICE[device_name] = best_name
-    return best_name
-
+#Pick the computer profile whose target_mean is closest to the real mean power of this device (from smartmeter logs).
 def _choose_pc_profile_for_device(device_name: str) -> Optional[str]:
     if device_name in _SELECTED_PC_PROFILE_BY_DEVICE:
         return _SELECTED_PC_PROFILE_BY_DEVICE[device_name]

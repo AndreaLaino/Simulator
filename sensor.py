@@ -9,6 +9,7 @@ from common import active_cycles
 from consumption_profiles import get_device_consumption, consumption_profiles
 from read import read_sensors as sensors_file
 from read import read_devices as devices_file
+from graph import get_last_real_temperature
 
 sensors = []
 add_point_enabled = False
@@ -65,28 +66,60 @@ def changeTemperature(canvas, sensor, sensors, heating_factor, delta_seconds):
     if len(sensor) != 11:
         print(f"Error: unexpected Temperature structure {sensor}")
         return None, None, sensors
+
     name, x, y, type, min_val, max_val, step, state, direction, consumption, associated_device = sensor
+
+    # ---- PARAMETRI BASE ----
     min_val = float(min_val)
     max_val = float(max_val)
     step = float(step)
-    state = float(state)
-    if type == "Temperature":
-        if heating_factor > 0:
-            new_state = min(state + (step * delta_seconds * heating_factor), max_val)
-        else:
-            new_state = max(state - (step * delta_seconds), min_val)
-        new_state = round(new_state * 2) / 2.0
-        updated_sensors = []
-        for s in sensors:
-            if s == sensor:
-                updated_sensor = (name, x, y, type, min_val, max_val, step, new_state, direction, consumption, associated_device)
-                updated_sensors.append(updated_sensor)
-            else:
-                updated_sensors.append(s)
-        update_sensor_color(canvas, name, new_state, min_val)
-        return name, new_state, updated_sensors
-    return None, None, sensors
+    current_state = float(state)
 
+    # ---- NUOVO VALORE REALE FILTRATO ----
+    # Media ultimi 3 valori dal CSV, se esiste
+    real_target = get_last_real_temperature(name, 3)
+
+    # ---- TARGET DELLA SIMULAZIONE ----
+    if real_target is not None:
+        # Clip ai limiti del sensore
+        real_target = max(min_val, min(max_val, real_target))
+        target = real_target
+    else:
+        # segue riscaldamento classico
+        target = None
+
+    # ---- MOVIMENTO GRADUALE (0.02°C A MIN SIMULATO) ----
+    change_speed = 0.02 * delta_seconds  # proporzionale al tempo simulato
+
+    if target is not None:
+        if abs(current_state - target) < change_speed:
+            new_state = target
+        elif current_state < target:
+            new_state = current_state + change_speed
+        else:
+            new_state = current_state - change_speed
+    else:
+        # Comportamento normale quando non c'è input reale
+        if heating_factor > 0:
+            new_state = min(current_state + (step * delta_seconds * heating_factor), max_val)
+        else:
+            new_state = max(current_state - (step * delta_seconds), min_val)
+
+    # ---- ARROTONDAMENTO ----
+    new_state = round(new_state * 2) / 2.0
+
+    # ---- AGGIORNA ARRAY SENSORI ----
+    updated = []
+    for s in sensors:
+        if s == sensor:
+            updated.append((name, x, y, type, min_val, max_val, step, new_state, direction, consumption, associated_device))
+        else:
+            updated.append(s)
+
+    # ---- AGGIORNA COLORE ----
+    update_sensor_color(canvas, name, new_state, min_val)
+
+    return name, new_state, updated
 
 def changeSmartMeter(canvas, sensor, sensors, devices, delta_seconds, current_datetime):
     if len(sensor) < 11:

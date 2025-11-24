@@ -176,7 +176,7 @@ def _load_consumption_from_interactions(sensor_name: str) -> dict:
         return {}
     return out
 
-# --------------- helper dual-plot ---------------
+
 def _normalize_index_to_date(df: pd.DataFrame, target_day: date) -> pd.DataFrame:
     if df.empty:
         return df
@@ -185,18 +185,17 @@ def _normalize_index_to_date(df: pd.DataFrame, target_day: date) -> pd.DataFrame
     return df
 
 def _dual_plot_smart(ax, sensor: str, sensor_data: dict, sensor_states: dict):
-    # ---- SIMULATO
+    #SIMULATED
     time_list = sensor_data.get('time', [])
     consumption_list = sensor_data.get('consumption')
     if not consumption_list:
         m = _load_consumption_from_interactions(sensor)
         if m:
-            # mappa timestamp completi/HH:MM ai tuoi time_list
             keys = list(m.keys())
             mapped = []
             for t in time_list:
                 key = None
-                if len(t) == 5:  # HH:MM
+                if len(t) == 5:
                     suffix = f" {t}"
                     for k in keys:
                         if k.endswith(suffix):
@@ -211,7 +210,7 @@ def _dual_plot_smart(ax, sensor: str, sensor_data: dict, sensor_states: dict):
     y_series_sim = _align_len(consumption_list, len(time_list), fill=None) if consumption_list else []
     df_sim = _build_dataframe(time_list, y_series_sim) if y_series_sim else pd.DataFrame()
 
-    # ---- REALE (solo se mappato)
+    #REAL
     df_real = pd.DataFrame()
     ip_binding = _get_binding_ip_for_sensor(sensor)
     if ip_binding:
@@ -222,11 +221,10 @@ def _dual_plot_smart(ax, sensor: str, sensor_data: dict, sensor_states: dict):
         ax.text(0.5, 0.5, "Nessun dato (né simulato né reale) per Smart Meter", ha="center", va="center", transform=ax.transAxes)
         return None, "Power (W)"
 
-    # allinea il reale alla stessa "giornata" del simulato (o 1900-01-01)
     ref_day = (df_sim.index[0].date() if not df_sim.empty else date(1900, 1, 1))
     df_real = _normalize_index_to_date(df_real, ref_day)
 
-    # plot
+    # PLOT
     if not df_sim.empty:
         ax.plot(df_sim.index, df_sim["value"], linestyle='-', linewidth=1.5, marker='o', markersize=2, label=f"{sensor} (sim)")
     if not df_real.empty:
@@ -238,7 +236,7 @@ def _dual_plot_smart(ax, sensor: str, sensor_data: dict, sensor_states: dict):
     df_for_date = df_sim if not df_sim.empty else df_real
     return df_for_date, "Power (W)"
 
-# ---------------- UI: grafici manuali ----------------
+#UI
 def show_graphs(canvas, sensor_states):
     def generate_graph(sensor, sensor_data, frame):
         fig, ax = plt.subplots(figsize=(12, 6))
@@ -369,7 +367,7 @@ def show_graphs(canvas, sensor_states):
 
     tk.Button(selection_window, text="Generate Graphs", command=save_selected_logs).pack(pady=10)
 
-# ---------------- UI: grafici automatici ----------------
+
 def show_graphs_auto(sensor_states, selected_keys, target_frame):
     def generate_graph(sensor, sensor_data, frame):
         fig, ax = plt.subplots(figsize=(12, 6))
@@ -443,3 +441,31 @@ def show_graphs_auto(sensor_states, selected_keys, target_frame):
         card = ttk.Frame(container)
         card.pack(fill="x", pady=10)
         generate_graph(key, sensor_states[key], card)
+
+def get_last_real_temperature(label, n=3):
+    """
+    Legge la media degli ultimi N valori reali dal sensore DHT <label>.
+    Ritorna None se non ci sono valori validi.
+    """
+    file = f"logs/dht_{label}.csv"
+    if not os.path.exists(file):
+        return None
+
+    try:
+        df = pd.read_csv(file)
+    except:
+        return None
+
+    if "temp" not in df.columns:
+        return None
+
+    # Rimuove valori vuoti o non numerici
+    df = df[pd.to_numeric(df["temp"], errors="coerce").notnull()]
+
+    if len(df) == 0:
+        return None
+
+    # Prende ultimi N valori
+    last_values = df["temp"].astype(float).tail(n)
+
+    return round(last_values.mean(), 2)

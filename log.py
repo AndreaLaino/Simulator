@@ -123,7 +123,7 @@ def show_log(canvas, sensor_states, load_active):
         else:
             if str(sensor_type).lower() == "smart meter":
                 consumption_list = _align_len(sensor_data.get('consumption'), len(time_list), fill=None)
-                text_box.insert(tk.END, "time\tstate\tconsumption\n")
+                text_box.insert(tk.END, "time\state\tconsumption\n")
                 for t, s, c in zip(time_list, state_list, consumption_list):
                     text_box.insert(tk.END, f"{t}\t{s}\t{c}\n")
             else:

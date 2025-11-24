@@ -158,7 +158,7 @@ def stop_all():
     for k in list(LOGGERS.keys()):
         stop_dht_logger(k)
 
-# ---------- Loader (per grafici) ----------
+# ---------- Loader (for graphs) ----------
 def _df_from_rows(rows: list[dict]) -> pd.DataFrame:
     if not rows:
         return pd.DataFrame()
@@ -167,8 +167,8 @@ def _df_from_rows(rows: list[dict]) -> pd.DataFrame:
     df = df.dropna(subset=["timestamp"]).sort_values("timestamp").set_index("timestamp")
     return df.resample("1min").median()
 
+
 def load_temp_by_label_any_csv(label: str, logs_dir="logs") -> pd.DataFrame:
-    # cerca esattamente logs/dht_<label>.csv
     path = os.path.join(logs_dir, f"dht_{_sanitize(label)}.csv")
     rows = []
     if os.path.isfile(path):

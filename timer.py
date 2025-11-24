@@ -47,24 +47,6 @@ class TimerApp:
 
         self.update_timer()
 
-    # ============================================================
-    #  24-HOUR SIMULATION LIMIT CHECK
-    # ============================================================
-    def has_reached_24h(self):
-        if self.simulated_start_time is None:
-            return False
-
-        # real seconds passed
-        total_seconds = self.elapsed_time.total_seconds()
-
-        # simulated seconds (1 real sec = 60 simulated sec)
-        simulated_seconds = total_seconds * 60
-
-        # 24 hours = 86400 simulated secs
-        return simulated_seconds >= 24 * 3600
-
-    # ============================================================
-
     def start_stop(self):
         if not self.is_running:
             if self.start_time is None:
@@ -100,13 +82,6 @@ class TimerApp:
         else:
             self.elapsed_time += timedelta(seconds=15)
 
-        # Check limit after skip
-        if self.has_reached_24h():
-            self.is_running = False
-            self.start_stop_button.config(text="Start")
-            self.label.config(text=f"Time: 24:00 \n Date: {self.current_date}")
-            return
-
         self.advanced = True
         simulated_time = self.get_simulated_time()
         self.label.config(text=f"Time: {simulated_time} \n Date: {self.current_date}")
@@ -114,22 +89,19 @@ class TimerApp:
 
     def reset_flag(self):
         self.advanced = False
-
+    
     def get_simulated_time(self):
         if self.simulated_start_time is None:
             return "00:00"
 
         total_seconds = self.elapsed_time.total_seconds()
-        simulated_hours = int(total_seconds // 60)
-        simulated_minutes = int(total_seconds % 60)
+        simulated_minutes = int(total_seconds)  
+        simulated_time = self.simulated_start_time + timedelta(minutes=simulated_minutes)
 
-        final_simulated_time = self.simulated_start_time + timedelta(hours=simulated_hours,
-                                                                     minutes=simulated_minutes)
+        if simulated_time.date() != datetime.strptime(self.current_date, "%Y-%m-%d").date():
+            self.current_date = simulated_time.date().strftime("%Y-%m-%d")
 
-        if self.has_reached_24h():
-            return "24:00"
-
-        return final_simulated_time.strftime("%H:%M")
+        return simulated_time.strftime("%H:%M")
 
     def reset(self):
         self.is_running = False
@@ -145,12 +117,6 @@ class TimerApp:
     def update_timer(self):
         if self.is_running:
             self.elapsed_time = datetime.now() - self.start_time
-
-            if self.has_reached_24h():
-                self.is_running = False
-                self.start_stop_button.config(text="Start")
-                self.label.config(text=f"Time: 24:00 \n Date: {self.current_date}")
-                return
 
             simulated_time = self.get_simulated_time()
             self.label.config(text=f"Time: {simulated_time} \n Date: {self.current_date}")

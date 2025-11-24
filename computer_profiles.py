@@ -2,11 +2,6 @@
 from __future__ import annotations
 from typing import Dict
 
-# Each profile has:
-# - standby
-# - profile  (minute -> W)
-# - target_mean  = "typical" mean power of that profile (used for matching)
-
 COMPUTER_PROFILES: Dict[str, dict] = {
     "PC_low": {
         "standby": 35.0,

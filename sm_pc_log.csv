@@ -1,0 +1,4 @@
+time,state,consumption,type,x,y
+2025-11-21 12:15,0.0,0.0,Smart Meter,358,273
+2025-11-21 12:16,1.0,30.0,Smart Meter,358,273
+2025-11-21 13:03,1.0,38.0,Smart Meter,358,273
