@@ -9,7 +9,7 @@ from common import active_cycles
 from consumption_profiles import get_device_consumption, consumption_profiles
 from read import read_sensors as sensors_file
 from read import read_devices as devices_file
-from graph import get_last_real_temperature
+
 
 sensors = []
 add_point_enabled = False
@@ -63,6 +63,7 @@ def changePIR(canvas, sensor, sensors, new_state=None):
     return name, new_state, updated_sensors
 
 def changeTemperature(canvas, sensor, sensors, heating_factor, delta_seconds):
+    from graph import get_last_real_temperature
     if len(sensor) != 11:
         print(f"Error: unexpected Temperature structure {sensor}")
         return None, None, sensors
