@@ -24,6 +24,7 @@ from app.io.scenario import (
     delete_scenario,
     export_simulation_csv,
     import_csv,
+    import_csv_from_s3,
 )
 from app.ui.bindings import open_bind_ip_ui, open_bind_dht_ui
 
@@ -147,7 +148,8 @@ def build_home_ui(ctx: AppContext):
     sim_menu.add_command(label="Activity Log", command=lambda: __import__("log").show_activity_log())
     sim_menu.add_command(label="Generate graphs", command=lambda: __import__("graph").show_graphs(ctx.canvas, sensor_states))
     sim_menu.add_separator()
-    sim_menu.add_command(label="Import sensor CSV file", command=lambda: import_csv())
+    sim_menu.add_command(label="Import sensor CSV from S3", command=lambda: import_csv_from_s3(ctx.window))
+    sim_menu.add_command(label="Import sensor CSV (local)", command=lambda: import_csv(ctx.window))
     sim_menu.add_command(label="Export simulations (CSV)", command=lambda: export_simulation_csv())
     sim_menu.add_separator()
     sim_menu.add_command(label="Bind Smart Meter (IP → sensor)", command=lambda: open_bind_ip_ui(ctx.window, sensor_states))
