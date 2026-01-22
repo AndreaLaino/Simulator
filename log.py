@@ -1,12 +1,10 @@
 import tkinter as tk
 from tkinter import messagebox, ttk, filedialog
 import csv
-
-from read import read_sensors
-from sensor import sensors
-
 import os
 from datetime import datetime
+from read import read_sensors
+from sensor import sensors
 
 activity_log = []  # list of dictionaries: {"activity": . "start": . "end": .}
 active_activities = {}  # dict: {"cooking": "00:05", "laundry": "00:06"}

@@ -1,6 +1,6 @@
 import tkinter as tk
 from point import points
-from read import read_walls_coordinates
+from read import read_walls_coordinates, coordinates, read_walls
 
 walls = []
 walls_coordinates = []
@@ -8,10 +8,14 @@ walls_coordinates = []
 def draw_line_window(canvas, window, load_active):
     global walls
 
+    # Pick the correct list of points depending on whether a scenario is loaded
+    point_source = coordinates if load_active else points
+
     def draw_line():
         point1 = point1_entry.get()
         point2 = point2_entry.get()
         if load_active:
+            read_walls.append((point1, point2))
             read_walls_coordinates.append(str(point1))
             read_walls_coordinates.append(str(point2))
         else:
@@ -21,7 +25,7 @@ def draw_line_window(canvas, window, load_active):
         # Look up coordinates for the given point names
         coord_point1 = None
         coord_point2 = None
-        for point in points:
+        for point in point_source:
             if point[0] == point1:
                 coord_point1 = (point[1], point[2])
             elif point[0] == point2:

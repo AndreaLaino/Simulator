@@ -1,12 +1,86 @@
 import tkinter as tk
 import math
+import os
+import json
+from typing import Optional
 
 from consumption_profiles import consumption_profiles, get_device_consumption
+
+# Cache to avoid re-reading CSVs repeatedly when drawing sensors.
+_REAL_TEMP_CACHE: dict[str, bool] = {}
+
+
+def _is_real_temperature_sensor(sensor_name: str, logs_dir: str = "logs") -> bool:
+    """Return True if this Temperature sensor is backed by real DHT logs.
+
+    We detect it by:
+      1) Trying label-based CSV lookup (sensor_name).
+      2) Falling back to sensor_map.json -> gpio lookup.
+
+    This function is intentionally lightweight and cached.
+    """
+    if not sensor_name:
+        return False
+    if sensor_name in _REAL_TEMP_CACHE:
+        return _REAL_TEMP_CACHE[sensor_name]
+
+    ok = False
+    try:
+        from dhtlogger import load_temp_by_label_any_csv, load_temp_by_gpio_any_csv
+
+        # 1) label lookup
+        df = None
+        try:
+            df = load_temp_by_label_any_csv(sensor_name, logs_dir=logs_dir)
+        except TypeError:
+            # older signature (no logs_dir)
+            df = load_temp_by_label_any_csv(sensor_name)
+        if df is not None and not df.empty and "value" in df.columns:
+            ok = True
+        else:
+            # 2) gpio lookup via sensor_map.json
+            mapping_path = "sensor_map.json"
+            if os.path.isfile(mapping_path):
+                with open(mapping_path, "r", encoding="utf-8") as f:
+                    mapping = json.load(f) if f else {}
+                cfg = mapping.get(sensor_name, {}) if isinstance(mapping, dict) else {}
+                if isinstance(cfg, dict) and cfg.get("by") == "dht":
+                    gpio = cfg.get("gpio")
+                    if gpio is not None:
+                        try:
+                            df2 = load_temp_by_gpio_any_csv(int(gpio), logs_dir=logs_dir)
+                        except TypeError:
+                            df2 = load_temp_by_gpio_any_csv(int(gpio))
+                        if df2 is not None and not df2.empty and "value" in df2.columns:
+                            ok = True
+    except Exception:
+        ok = False
+
+    _REAL_TEMP_CACHE[sensor_name] = ok
+    return ok
+
+
+def _temperature_color(sensor_name: str, changing: bool = False) -> str:
+    """Color rules for Temperature sensors.
+
+    - If linked to a real DHT sensor -> cyan (azzurro)
+    - Else -> green only while changing, red otherwise
+    """
+    if _is_real_temperature_sensor(sensor_name):
+        return "cyan"
+    return "green" if changing else "red"
 
 
 def draw_sensor(canvas, sensor):
     name, x, y, type, min_val, max_val, step, state, direction, consumption, associated_device = sensor
-    color = "green" if float(state) > float(min_val) else "red"
+    # Default coloring:
+    #   - Temperature sensors: special rules (cyan if linked to real DHT logs; else green only when changing)
+    #   - Other sensors: keep legacy behavior (green if above min)
+    if type == "Temperature":
+        # At draw time we don't know if it's "changing" yet -> show red (or cyan if real)
+        color = _temperature_color(name, changing=False)
+    else:
+        color = "green" if float(state) > float(min_val) else "red"
     rect_tag = f'{name}_rect_sensor'
     text_tag = f'{name}_text_sensor'
     canvas.create_rectangle(x - 5, y - 5, x + 5, y + 5, fill=color, tags=('sensor', rect_tag))
@@ -134,7 +208,21 @@ def find_switch_sensors_by_doors(doors, sensors):
     return results
 
 def update_sensor_color(canvas, name, state, min_val):
+    # Legacy rule for most sensors.
     color = "green" if float(state) > float(min_val) else "red"
+    rect_tag = f'{name}_rect_sensor'
+    text_tag = f'{name}_text_sensor'
+    canvas.itemconfig(rect_tag, fill=color)
+    canvas.itemconfig(text_tag, fill=color)
+
+
+def update_temperature_sensor_color(canvas, name: str, *, changing: bool) -> None:
+    """Explicit Temperature sensor color update.
+
+    - Real DHT-backed sensors -> cyan
+    - Simulated temperature sensors -> green only while changing
+    """
+    color = _temperature_color(name, changing=changing)
     rect_tag = f'{name}_rect_sensor'
     text_tag = f'{name}_text_sensor'
     canvas.itemconfig(rect_tag, fill=color)

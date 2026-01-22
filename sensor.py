@@ -1,7 +1,7 @@
 import tkinter as tk
 from tkinter import simpledialog, messagebox
 from tkinter import ttk
-from utils import draw_sensor, calculate_distance, update_sensor_color
+from utils import draw_sensor, calculate_distance, update_sensor_color, update_temperature_sensor_color
 from common import sensor_states
 from device import devices
 from datetime import datetime
@@ -11,12 +11,20 @@ from read import read_sensors as sensors_file
 from read import read_devices as devices_file
 import os, json
 from dhtlogger import load_temp_by_label_any_csv, load_temp_by_gpio_any_csv
+import pandas as pd
+from collections import deque
+
+TEMP_RECENT: dict[str, deque] = {}
 
 sensors = []
 add_point_enabled = False
 
 SENSOR_MAP_PATH = "sensor_map.json"
 
+# cache: per ogni sensore -> (lista_tempi_min, lista_valori_C)
+TEMP_SERIES: dict[str, tuple[list[float], list[float]]] = {}
+# tempo simulato (in "unità" di delta_seconds) per ogni sensore
+TEMP_SIM_MIN: dict[str, float] = {}
 
 def _load_sensor_map(path: str = SENSOR_MAP_PATH) -> dict:
     try:
@@ -27,6 +35,125 @@ def _load_sensor_map(path: str = SENSOR_MAP_PATH) -> dict:
     except Exception as e:
         print(f"[WARN] cannot load {path}: {e}")
     return {}
+
+
+def _sanitize(name: str) -> str:
+    return "".join(ch if ch.isalnum() or ch in "-._" else "-" for ch in (name or "").strip())
+
+def _load_temp_series_for_sensor(sensor_name: str):
+    """
+    Carica dal logger DHT la serie di temperatura per questo sensore.
+    Usa load_temp_by_label_any_csv(sensor_name), che è lo stesso
+    meccanismo che uso per i grafici 'reali'.
+
+    Restituisce:
+        (times, values)
+    dove:
+        times  = minuti relativi dal primo campione (float)
+        values = temperatura in °C (float)
+    oppure None se non c'è niente.
+    """
+    if not sensor_name:
+        TEMP_SERIES[sensor_name] = None
+        return None
+
+    # cache già caricata
+    if sensor_name in TEMP_SERIES:
+        return TEMP_SERIES[sensor_name]
+
+    # 1) prova per label 
+    df = None
+    try:
+        df = load_temp_by_label_any_csv(sensor_name)
+    except Exception as e:
+        print(f"[TEMP] load_temp_by_label_any_csv fallita per {sensor_name}: {e}")
+
+    # 2) sennò fai per GPIO
+    if (df is None or df.empty or "value" not in df.columns):
+        mapping = _load_sensor_map()
+        cfg = mapping.get(sensor_name, {})
+        if isinstance(cfg, dict) and cfg.get("by") == "dht":
+            gpio = cfg.get("gpio")
+            if gpio is not None:
+                try:
+                    df = load_temp_by_gpio_any_csv(int(gpio))
+                except Exception as e:
+                    print(f"[TEMP] load_temp_by_gpio_any_csv fallita per {sensor_name}: {e}")
+
+    if df is None or df.empty or "value" not in df.columns:
+        print(f"[TEMP] nessuna serie trovata per {sensor_name}")
+        TEMP_SERIES[sensor_name] = None
+        return None
+
+    if df is None or df.empty or "value" not in df.columns:
+        print(f"[TEMP] nessuna serie trovata per {sensor_name}")
+        TEMP_SERIES[sensor_name] = None
+        return None
+
+    # tieni solo valori validi (togli quelli che non legge a causa di bug e altri fattori)
+    df = df.dropna(subset=["value"])
+    if df.empty:
+        print(f"[TEMP] solo NaN per {sensor_name}")
+        TEMP_SERIES[sensor_name] = None
+        return None
+
+    # faccia in modo tale che sia ordinato temporalmente
+    if not isinstance(df.index, pd.DatetimeIndex):
+        try:
+            df.index = pd.to_datetime(df.index, errors="coerce")
+        except Exception as e:
+            print(f"[TEMP] impossibile convertire indice in datetime per {sensor_name}: {e}")
+    df = df.sort_index()
+
+    if df.empty:
+        TEMP_SERIES[sensor_name] = None
+        return None
+
+    # minuti relativi dal primo campione
+    t0 = df.index[0]
+    rel_minutes = (df.index - t0).total_seconds() / 60.0
+    times = rel_minutes.to_list()
+    values = df["value"].astype(float).to_list()
+
+    TEMP_SERIES[sensor_name] = (times, values)
+    print(
+        f"[TEMP] {sensor_name}: {len(times)} campioni "
+        f"da {df.index[0]} a {df.index[-1]}"
+    )
+    return TEMP_SERIES[sensor_name]
+
+def get_replay_temperature(sensor_name: str, sim_minutes: float):
+    series = _load_temp_series_for_sensor(sensor_name)
+    if not series:
+        return None
+
+    times, values = series
+    if not times or not values:
+        return None
+
+    # before first
+    if sim_minutes <= times[0]:
+        return float(values[0])
+
+    # AFTER LAST: loop within the available period (repeat the day)
+    if sim_minutes >= times[-1]:
+        period = times[-1] - times[0]
+        if period > 0:
+            sim_minutes = times[0] + ((sim_minutes - times[0]) % period)
+        else:
+            return float(values[-1])
+
+    # linear interpolation
+    for i in range(len(times) - 1):
+        t1, t2 = times[i], times[i + 1]
+        if t1 <= sim_minutes <= t2:
+            v1, v2 = values[i], values[i + 1]
+            if t2 == t1:
+                return float(v1)
+            alpha = (sim_minutes - t1) / (t2 - t1)
+            return float(v1 + alpha * (v2 - v1))
+
+    return float(values[-1])
 
 def get_sensor_params(sensor_type):
     params = {
@@ -40,6 +167,21 @@ def get_sensor_params(sensor_type):
         sensor_type,
         {"min": 0.0, "max": 1.0, "step": 1.0, "state": 0.0, "direction": None, "consumption": None},
     )
+
+
+def _last_slope_deg_per_min(series) -> float:
+    """Ritorna la pendenza finale in °C/min (ultima differenza)."""
+    if not series:
+        return 0.0
+    times, vals = series
+    if not times or not vals or len(times) < 2:
+        return 0.0
+    t2, t1 = float(times[-1]), float(times[-2])
+    v2, v1 = float(vals[-1]), float(vals[-2])
+    dt = (t2 - t1)
+    if dt <= 0:
+        return 0.0
+    return (v2 - v1) / dt
 
 
 def add_sensor(canvas, event, load_active):
@@ -118,11 +260,6 @@ def changePIR(canvas, sensor, sensors, new_state=None):
 
 
 def get_last_real_temperature(sensor_name: str, window_minutes: int = 10):
-    """
-    Ritorna la media degli ultimi 'window_minutes' minuti di temperatura reale
-    per il sensore loggato DHT associato a 'sensor_name'.
-    Usa prima il mapping by 'dht' (gpio), poi fallback per label.
-    """
     if not sensor_name:
         return None
 
@@ -140,7 +277,7 @@ def get_last_real_temperature(sensor_name: str, window_minutes: int = 10):
             except Exception as e:
                 print(f"[WARN] load_temp_by_gpio_any_csv failed for {sensor_name}: {e}")
 
-    # 2) fallback: cerca CSV per label
+    # 2) sennò cerca nel file
     if df is None or df.empty:
         try:
             df = load_temp_by_label_any_csv(sensor_name)
@@ -151,21 +288,20 @@ def get_last_real_temperature(sensor_name: str, window_minutes: int = 10):
     if df is None or df.empty or "value" not in df.columns:
         return None
 
-    # df è già a risoluzione 1 minuto: prendo gli ultimi 'window_minutes' punti
-    last = df.tail(window_minutes)
-    if last.empty:
+    # tieni solo i valori numerici validi
+    df_valid = df.dropna(subset=["value"])
+    if df_valid.empty:
         return None
 
+    # ULTIMO valore (cioè "in quel minuto")
     try:
-        return float(last["value"].mean())
+        latest = float(df_valid["value"].iloc[-1])
+        return latest
     except Exception:
         return None
     
+      
 def infer_room_state(sensor_name: str, window_minutes: int = 20) -> str:
-    """
-    Analizza la temperatura negli ultimi 'window_minutes' minuti e prova a
-    classificare lo stato della stanza: heating / cooling / cooking / stable.
-    """
     if not sensor_name:
         return "unknown"
 
@@ -191,35 +327,36 @@ def infer_room_state(sensor_name: str, window_minutes: int = 20) -> str:
     t0 = float(tail["value"].iloc[0])
     t1 = float(tail["value"].iloc[-1])
     delta = t1 - t0
-    slope = delta / max(1, len(tail) - 1)  # °C per minuto (circa)
+    slope = delta / max(1, len(tail) - 1)  # °C for minute
 
-    # Soglie molto empiriche: le aggiusti tu dopo aver visto i dati reali
     if slope > 0.15 and t1 >= 26:
-        return "cooking"      # sale tanto ed è già calda
+        return "cooking"      
     elif slope > 0.05:
-        return "heating"      # sta aumentando
+        return "heating"     
     elif slope < -0.05:
-        return "cooling"      # sta scendendo
+        return "cooling"    
     else:
         return "stable"
 
-def changeTemperature(canvas, sensor, sensors, heating_factor, delta_seconds):
+def changeTemperature(canvas, sensor, sensors, heating_factor, delta_seconds, current_datetime=None):
+    """
+    Update a Temperature sensor state.
+
+    Behavior:
+      - If no real CSV exists for this sensor: simple physical-ish update.
+      - If CSV exists:
+          * within CSV horizon: replay (interpolation)
+          * beyond CSV: damped extrapolation (no ML; temp_forecast module not present)
+    """
     if len(sensor) != 11:
         print(f"Error: unexpected Temperature structure {sensor}")
         return None, None, sensors
 
     (
-        name,
-        x,
-        y,
-        type,
-        min_val,
-        max_val,
-        step,
-        state,
-        direction,
-        consumption,
-        associated_device,   # qui non lo usiamo per DHT, il binding è in sensor_map.json
+        name, x, y, s_type,
+        min_val, max_val, step,
+        state, direction, consumption,
+        associated_device,
     ) = sensor
 
     min_val = float(min_val)
@@ -227,63 +364,65 @@ def changeTemperature(canvas, sensor, sensors, heating_factor, delta_seconds):
     step = float(step)
     current_state = float(state)
 
-    # ---- TARGET REALE DAL CSV (se associato in sensor_map.json) ----
-    real_target = get_last_real_temperature(name, window_minutes=10)
+    # 1 real second = 1 simulated minute
+    prev_sim_min = float(TEMP_SIM_MIN.get(name, 0.0))
+    delta_sim_min = float(delta_seconds or 0.0)
+    sim_min = prev_sim_min + delta_sim_min
+    TEMP_SIM_MIN[name] = sim_min
 
-    if real_target is not None:
-        # clamp ai limiti sensore
-        real_target = max(min_val, min(max_val, real_target))
-        target = real_target
-    else:
-        target = None
+    # Load real series (if available)
+    series = _load_temp_series_for_sensor(name)
+    last_real_min = None
+    if series:
+        times, _values = series
+        if times:
+            last_real_min = float(times[-1])
 
-    # ---- velocità di cambiamento (°C per minuto simulato) ----
-    change_speed = 0.02 * delta_seconds  # molto dolce
+    # Keep a recent buffer (useful if you re-enable ML later)
+    recent = TEMP_RECENT.get(name)
+    if recent is None:
+        recent = deque(maxlen=30)  # last 30 minutes
+        TEMP_RECENT[name] = recent
+    recent.append(float(current_state))
 
-    if target is not None:
-        # Mi avvicino lentamente alla temperatura reale
-        if abs(current_state - target) < change_speed:
-            new_state = target
-        elif current_state < target:
-            new_state = current_state + change_speed
-        else:
-            new_state = current_state - change_speed
-    else:
-        # Niente dati reali → comportamento simulato "classico"
+    new_state = float(current_state)
+
+    # --- If no CSV exists -> fallback "physics"
+    if last_real_min is None:
         if heating_factor > 0:
-            new_state = min(current_state + (step * delta_seconds * heating_factor), max_val)
+            new_state = current_state + step * delta_sim_min * float(heating_factor)
         else:
-            new_state = max(current_state - (step * delta_seconds), min_val)
+            new_state = current_state - step * delta_sim_min
 
-    # Arrotonda a mezzi gradi
-    new_state = round(new_state * 2) / 2.0
+        new_state = max(min_val, min(max_val, new_state))
+        new_state = round(new_state * 2) / 2.0
 
-    # Aggiorna lista sensori
+    else:
+        # --- CSV exists -> replay / extrapolate using get_replay_temperature()
+        target = get_replay_temperature(name, sim_min)
+        if target is not None:
+            new_state = float(target)
+
+        # Do NOT clamp to min/max when replaying real data
+        new_state = round(new_state, 2)
+
+
+    # Update buffer with the new value
+    recent.append(float(new_state))
+
     updated = []
     for s in sensors:
         if s == sensor:
             updated.append(
-                (
-                    name,
-                    x,
-                    y,
-                    type,
-                    min_val,
-                    max_val,
-                    step,
-                    new_state,
-                    direction,
-                    consumption,
-                    associated_device,
-                )
+                (name, x, y, s_type, min_val, max_val, step, new_state, direction, consumption, associated_device)
             )
         else:
             updated.append(s)
 
-    # aggiorna colore
-    update_sensor_color(canvas, name, new_state, min_val)
-
+    changing = abs(new_state - current_state) > 1e-6
+    update_temperature_sensor_color(canvas, name, changing=changing)
     return name, new_state, updated
+
 
 def changeSmartMeter(canvas, sensor, sensors, devices, delta_seconds, current_datetime):
     if len(sensor) < 11:
@@ -318,21 +457,12 @@ def changeSmartMeter(canvas, sensor, sensors, devices, delta_seconds, current_da
             dev_name, _, _, dev_type, _, dev_state, *_ = associated_dev
 
             if dev_state == 1:
-                if dev_name in active_cycles:
-                    new_consumption = get_device_consumption(
-                        dev_name, dev_type, current_datetime, active_cycles, dev_state
-                    )
-                else:
-                    prof = consumption_profiles.get(dev_type)
-                    if prof:
-                        profile = prof["profile"]
-                        if profile:
-                            first_key = sorted(profile)[0]
-                            new_consumption = profile[first_key]
-                        else:
-                            new_consumption = 0.0
-                    else:
-                        new_consumption = 0.0
+                # get_device_consumption already handles:
+                # - active cycle -> profile
+                # - ON but idle  -> standby
+                new_consumption = get_device_consumption(
+                    dev_name, dev_type, current_datetime, active_cycles, dev_state
+                )
             else:
                 new_consumption = 0.0
 
@@ -418,26 +548,27 @@ class SensorDialog(simpledialog.Dialog):
         self.sensor_type = ttk.Combobox(
             master,
             values=["PIR", "Temperature", "Switch", "Smart Meter", "Weight"],
+            state="readonly",
         )
         self.sensor_type.grid(row=1, column=1)
         self.sensor_type.current(0)
 
         self.direction_label = tk.Label(master, text="Direction (degrees):")
         self.direction_entry = tk.Entry(master)
+        self.direction_entry.insert(0, "0")
 
         self.associated_device_label = tk.Label(master, text="Associated device:")
 
-        # Merge runtime + devices loaded from files (without duplicates)
         devices_names_runtime = [d[0] for d in devices] if devices else []
         devices_names_file = [d[0] for d in devices_file] if devices_file else []
         devices_names = sorted(set(devices_names_runtime + devices_names_file))
 
-        self.associated_device_combobox = ttk.Combobox(master, values=devices_names)
+        self.associated_device_combobox = ttk.Combobox(master, values=devices_names, state="readonly")
 
         self.sensor_type.bind("<<ComboboxSelected>>", self.on_sensor_type_selected)
+        self.on_sensor_type_selected(None)
 
         return self.sensor_name
-
     # Show 'direction' for PIR or 'associated device' for Smart Meter only.
     def on_sensor_type_selected(self, event):
         type = self.sensor_type.get()
@@ -500,15 +631,17 @@ class SensorDialog(simpledialog.Dialog):
             params["direction"] = direction
 
         associated_device = None
-
         if type == "Smart Meter":
             associated_device = self.associated_device_combobox.get()
 
         if type == "Temperature":
-            # se esiste un logger DHT associato, provo a leggere il valore iniziale
-            real_temp = get_last_real_temperature(name, window_minutes=10)
-            if real_temp is not None:
-                params["state"] = max(params["min"], min(params["max"], real_temp))
+            # se esiste la serie dal CSV, usa il primo valore reale come stato iniziale
+            series = _load_temp_series_for_sensor(name)
+            if series:
+                _, vals = series
+                if vals:
+                    real_temp = float(vals[0])
+                    params["state"] = max(params["min"], min(params["max"], real_temp))
 
         self.result = (
             name,

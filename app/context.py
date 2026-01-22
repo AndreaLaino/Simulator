@@ -12,9 +12,10 @@ class AppContext:
     activity_label: Optional[tk.Label] = None
     
     file_menu: Optional[tk.Menu] = None
+    scenario_menu: Optional[tk.Menu] = None
     simulation_menu: Optional[tk.Menu] = None
 
-    # Scenario buffers/flags (mirrors previous globals)
+    # State variables
     load_active: bool = False
     current_file: Optional[str] = None
     

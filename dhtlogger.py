@@ -8,7 +8,6 @@ import pandas as pd
 logger = logging.getLogger("dht")
 logger.setLevel(logging.INFO)
 
-#try to import DHT libraries
 _USE_CPY = False
 _USE_ADA = False
 try:
@@ -22,7 +21,7 @@ except Exception:
         pass
 
 LOGGERS: dict[str, "DHTLogger"] = {}
-DEFAULT_INTERVAL = 5
+DEFAULT_INTERVAL = 60
 
 # sanitize label for filesystem use
 def _sanitize(name: str) -> str:
@@ -54,7 +53,7 @@ def _board_pin_from_bcm(gpio: int):
         26: getattr(board, "D26", None),
     }.get(int(gpio), None)
 
-# ---------- DHT Logger Class ----------
+#DHT Logger Class 
 class DHTLogger:
     def __init__(self, sensor_label: str, gpio_bcm: int, interval: int = DEFAULT_INTERVAL):
         self.label = str(sensor_label)
@@ -94,7 +93,7 @@ class DHTLogger:
         logger.info("DHTLogger '%s' stopped", self.label)
 
     def _read_once(self) -> Tuple[Optional[float], Optional[float]]:
-        # CircuitPython
+        # CircuitPython DHT
         if _USE_CPY and self._dht_device is not None:
             try:
                 t = self._dht_device.temperature
@@ -102,7 +101,6 @@ class DHTLogger:
                 return (float(t) if t is not None else None,
                         float(h) if h is not None else None)
             except RuntimeError:
-                # fisiologico con DHT
                 return (None, None)
             except Exception as e:
                 logger.warning("[DHT '%s'] error CircuitPython: %s", self.label, e)
@@ -119,7 +117,7 @@ class DHTLogger:
                 logger.warning("[DHT '%s'] errore Adafruit_DHT: %s", self.label, e)
                 return (None, None)
 
-        # Nessuna libreria
+        # No librery available
         logger.warning("[DHT '%s'] no DHT library avaiable in this host", self.label)
         return (None, None)
 
@@ -139,8 +137,10 @@ class DHTLogger:
                     break
                 time.sleep(1)
 
-# ---------- DHT Logger Management ----------
+
+# ---------- Manager functions ----------
 def start_dht_logger(sensor_label: str, gpio: int, interval: int = DEFAULT_INTERVAL) -> DHTLogger:
+    """start a DHT logger for the given sensor label and GPIO BCM pin."""
     lab = str(sensor_label)
     lg = LOGGERS.get(lab)
     if lg is None:
@@ -158,8 +158,10 @@ def stop_all():
     for k in list(LOGGERS.keys()):
         stop_dht_logger(k)
 
+
 # ---------- Loader (for graphs) ----------
 def _df_from_rows(rows: list[dict]) -> pd.DataFrame:
+    """load a DataFrame from a list of rows with 'timestamp' and 'value' keys."""
     if not rows:
         return pd.DataFrame()
     df = pd.DataFrame(rows)
@@ -169,6 +171,7 @@ def _df_from_rows(rows: list[dict]) -> pd.DataFrame:
 
 
 def load_temp_by_label_any_csv(label: str, logs_dir="logs") -> pd.DataFrame:
+    """Load temperature data for the given sensor label from any CSV in logs_dir."""
     path = os.path.join(logs_dir, f"dht_{_sanitize(label)}.csv")
     rows = []
     if os.path.isfile(path):
@@ -182,7 +185,9 @@ def load_temp_by_label_any_csv(label: str, logs_dir="logs") -> pd.DataFrame:
                     continue
     return _df_from_rows(rows)
 
+#fallback
 def load_temp_by_gpio_any_csv(gpio: int, logs_dir="logs") -> pd.DataFrame:
+    """load temperature data for the given GPIO BCM pin from any CSV in logs_dir."""
     rows = []
     for path in glob.glob(os.path.join(logs_dir, "dht_*.csv")):
         try:

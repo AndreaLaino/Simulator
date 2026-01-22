@@ -59,11 +59,11 @@ def draw_door(canvas, door):
     else:
         canvas.create_line(x1, y1, x2, y2, fill="grey", width=4, dash=(4, 2), tags="door")
 
+
 def draw_all_doors(canvas, doors):
     canvas.delete("door")
     for door in doors:
         draw_door(canvas, door)
-
 
 
 def interaction_with_door(canvas, event, doors):
@@ -86,7 +86,6 @@ def interaction_with_door(canvas, event, doors):
             print(f"Door format not valid: {door}")
 
 def point_in_line(px, py, x1, y1, x2, y2, tolerance):
-    # Check if a point (px, py) is near a line (x1, y1, x2, y2).
     line_mag = ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5
     if line_mag < tolerance:
         return False

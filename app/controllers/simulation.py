@@ -10,6 +10,7 @@ from app.logging_setup import setup_logging
 
 logger = setup_logging("controllers.simulation")
 
+
 def start_sim(ctx: AppContext):
     """Start manual simulation and wire callbacks."""
     from tkinter import messagebox
@@ -20,7 +21,7 @@ def start_sim(ctx: AppContext):
     if not s_sensors:
         messagebox.showwarning("Error", "No sensors found to start the simulation.")
         return
-    
+
     ctx.simulation_menu.entryconfig("Manual", state="disabled")
 
     timer_app_instance = TimerApp(
@@ -29,18 +30,34 @@ def start_sim(ctx: AppContext):
             start_simulation(ctx.canvas, timer_app_instance, ctx.load_active, ctx.activity_label),
             monitor_activities(ctx.canvas, ctx.load_active, ctx.activity_label, timer_app_instance),
             start_interaction_log_session(timer_app_instance.get_simulated_time()),
-            ctx.canvas.bind("<Button-1>", lambda event: interaction(ctx.canvas, timer_app_instance, event, ctx.load_active, ctx.activity_label))
+            ctx.canvas.bind(
+                "<Button-1>",
+                lambda event: interaction(ctx.canvas, timer_app_instance, event, ctx.load_active, ctx.activity_label),
+            ),
         ),
         stop_callback=lambda: (
             stop_simulation(timer_app_instance),
             close_current_activity(timer_app_instance, ctx.activity_label),
             stop_interaction_log_session(),
-            ctx.canvas.unbind("<Button-1>")
-        )
+            ctx.canvas.unbind("<Button-1>"),
+            enable_all_menus(ctx),
+            ctx.simulation_menu.entryconfig("Manual", state="normal"),
+        ),
     )
 
-    ctx.activity_label = tk.Label(ctx.timer_frame, text="Activity: None", font=("Helvetica", 16), bg="white", fg="black")
+    ctx.activity_label = tk.Label(
+        ctx.timer_frame, text="Activity: None", font=("Helvetica", 16), bg="white", fg="black"
+    )
     ctx.activity_label.pack(pady=10)
+    
+    timer_app_instance.on_advance_step = lambda ds: update_sensors(
+        ctx.canvas,
+        timer_app_instance,
+        ctx.load_active,
+        ctx.activity_label,
+        schedule_next=False,
+        force=True,
+    )
 
     update_sensors(ctx.canvas, timer_app_instance, ctx.load_active, ctx.activity_label)
     disable_all_menus(ctx)
@@ -58,6 +75,7 @@ def enable_all_menus(ctx: AppContext):
 
 def exit_app(ctx: AppContext):
     from tkinter import messagebox
+
     if messagebox.askyesno("Exit", "Are you sure you want to close the application?"):
         try:
             if ctx.smart_logger is not None:
@@ -66,3 +84,8 @@ def exit_app(ctx: AppContext):
         except Exception as e:
             logger.warning("Stopping SmartMeterLogger failed: %s", e)
         ctx.window.quit()
+
+
+from .simulation import start_sim, enable_all_menus, exit_app
+
+__all__ = ["start_sim", "enable_all_menus", "exit_app"]

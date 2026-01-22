@@ -23,6 +23,7 @@ from app.io.scenario import (
     save_scenario_as,
     delete_scenario,
     export_simulation_csv,
+    import_csv,
 )
 from app.ui.bindings import open_bind_ip_ui, open_bind_dht_ui
 
@@ -37,23 +38,23 @@ def _load_image(canvas_obj: tk.Canvas, file_path: str):
 
 def _menu_add_point(ctx: AppContext):
     ctx.canvas.bind("<Button-1>", lambda event: add_point(ctx.canvas, event, ctx.load_active))
-    ctx.file_menu.entryconfig("Add points", state="disabled")
-    ctx.file_menu.entryconfig("Add sensors", state="normal")
-    ctx.file_menu.entryconfig("Add devices", state="normal")
+    ctx.scenario_menu.entryconfig("Add points", state="disabled")
+    ctx.scenario_menu.entryconfig("Add sensors", state="normal")
+    ctx.scenario_menu.entryconfig("Add devices", state="normal")
 
 
 def _menu_add_device(ctx: AppContext):
     ctx.canvas.bind("<Button-1>", lambda event: add_device(ctx.canvas, event, ctx.load_active))
-    ctx.file_menu.entryconfig("Add devices", state="disabled")
-    ctx.file_menu.entryconfig("Add sensors", state="normal")
-    ctx.file_menu.entryconfig("Add points", state="normal")
+    ctx.scenario_menu.entryconfig("Add devices", state="disabled")
+    ctx.scenario_menu.entryconfig("Add sensors", state="normal")
+    ctx.scenario_menu.entryconfig("Add points", state="normal")
 
 
 def _menu_add_sensor(ctx: AppContext):
     ctx.canvas.bind("<Button-1>", lambda event: add_sensor(ctx.canvas, event, ctx.load_active))
-    ctx.file_menu.entryconfig("Add sensors", state="disabled")
-    ctx.file_menu.entryconfig("Add devices", state="normal")
-    ctx.file_menu.entryconfig("Add points", state="normal")
+    ctx.scenario_menu.entryconfig("Add sensors", state="disabled")
+    ctx.scenario_menu.entryconfig("Add devices", state="normal")
+    ctx.scenario_menu.entryconfig("Add points", state="normal")
 
 
 def _menu_add_wall(ctx: AppContext):
@@ -67,7 +68,7 @@ def _menu_add_door(ctx: AppContext):
 
 
 def build_home_ui(ctx: AppContext):
-    # Se esiste già la home, la mostro soltanto
+    # If already built, just show it
     if getattr(ctx, "home_frame", None) is not None:
         ctx.home_frame.pack(fill=tk.BOTH, expand=True)
         return
@@ -108,7 +109,6 @@ def build_home_ui(ctx: AppContext):
     timer_canvas.create_window((0, 0), window=timer_frame, anchor="nw")
     ctx.timer_frame = timer_frame
 
-    # Menu bar sempre sulla window (ok)
     menu_bar = Menu(ctx.window)
     ctx.window.config(menu=menu_bar)
 
@@ -147,6 +147,7 @@ def build_home_ui(ctx: AppContext):
     sim_menu.add_command(label="Activity Log", command=lambda: __import__("log").show_activity_log())
     sim_menu.add_command(label="Generate graphs", command=lambda: __import__("graph").show_graphs(ctx.canvas, sensor_states))
     sim_menu.add_separator()
+    sim_menu.add_command(label="Import sensor CSV file", command=lambda: import_csv())
     sim_menu.add_command(label="Export simulations (CSV)", command=lambda: export_simulation_csv())
     sim_menu.add_separator()
     sim_menu.add_command(label="Bind Smart Meter (IP → sensor)", command=lambda: open_bind_ip_ui(ctx.window, sensor_states))

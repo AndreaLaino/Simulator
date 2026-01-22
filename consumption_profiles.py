@@ -100,6 +100,7 @@ DEVICE_ID_BY_SIM_NAME: Dict[str, str] = {
     "sm_pc": "sm_pc",   
 }
 
+
 def interpolated_consumption(profile, minutes, standby):
     keys = sorted(profile)
     if not keys:
@@ -118,8 +119,9 @@ def interpolated_consumption(profile, minutes, standby):
     return profile[keys[0]]
 
 
-def consumption_step(profile: dict, minutes: float, standby: float, repeat: bool = False, start_from_standby: bool = True) -> float:
 
+def consumption_step(profile: dict, minutes: float, standby: float, repeat: bool = False, start_from_standby: bool = True) -> float:
+    """Get the consumption at the given minute from the profile, with optional looping."""
     if not profile:
         return standby
     keys = sorted(profile)
@@ -139,24 +141,35 @@ def consumption_step(profile: dict, minutes: float, standby: float, repeat: bool
 
 from datetime import datetime  # if not already imported
 
-def get_device_consumption(device_name, device_type, current_timestamp, active_cycles, device_state=1):
-    """
-    - If device_state == 0 → 0 W.
-    - For 'Computer' type: pick the PC profile whose target_mean W
-      is closest to the real mean W measured by the smartmeter.
-    - For other types: use static profiles in consumption_profiles.
-    """
+
+
+def add_noise(value: float, rel_std: float = 0.02, abs_std: float = 3.0) -> float:
+    """Small gaussian noise to avoid perfectly flat synthetic signals."""
+    import random
+    std = max(abs_std, abs(value) * rel_std)
+    try:
+        return max(0.0, random.gauss(float(value), std))
+    except Exception:
+        return float(value)
+
+
+def profile_value_linear(profile: dict, minutes: float, standby: float) -> float:
+    """Linear interpolation on the consumption profile."""
+    return float(interpolated_consumption(profile, minutes, standby))
+
+
+
+def get_device_consumption(device_name, device_type, current_timestamp, active_cycles, device_state=1, *, add_random_noise: bool = True) -> float:
+    """Get the power consumption (W) of a device at the given timestamp."""
     if device_state == 0:
         return 0.0
 
-    # ---- choose base profile dict depending on device_type ----
+    #choose base profile dict depending on device_type 
     if device_type == "Computer":
-        # try to pick a specific computer template based on wattage
         pc_profile_name = _choose_pc_profile_for_device(device_name)
         if pc_profile_name and pc_profile_name in COMPUTER_PROFILES:
             base = COMPUTER_PROFILES[pc_profile_name]
         else:
-            # fallback: generic "Computer" template (if you keep it)
             base = consumption_profiles.get("Computer")
     else:
         base = consumption_profiles.get(device_type)
@@ -164,48 +177,65 @@ def get_device_consumption(device_name, device_type, current_timestamp, active_c
     if not base:
         return 0.0
 
-    standby = base["standby"]
-    prof_det = base["profile"]
+    standby = float(base.get("standby", 0.0))
+    prof_det = base.get("profile", {}) or {}
 
+    # which types loop
     repeat_by_type = {
         "Fridge": True,
         "Washing_Machine": False,
         "Dishwasher": False,
         "Coffee_Machine": False,
         "Oven": False,
-        "Computer": False,  # or True if you want looping PC patterns
+        "Computer": False,
     }
-    repeat = repeat_by_type.get(device_type, False)
+    repeat = bool(repeat_by_type.get(device_type, False))
 
+    # If in an active cycle, evaluate profile at elapsed minutes
     if device_name in active_cycles:
-        start_time, _type = active_cycles[device_name]
+        start_time, _cycle_type = active_cycles[device_name]
         elapsed_min = (current_timestamp - start_time).total_seconds() / 60.0
-        return consumption_step(prof_det, elapsed_min, standby, repeat=repeat, start_from_standby=True)
-    else:
-        keys = sorted(prof_det)
-        return prof_det[keys[0]] if keys else standby
+
+        # handle looping / bounds
+        keys = sorted(prof_det) if prof_det else []
+        duration = float(keys[-1]) if keys else 0.0
+
+        t = elapsed_min
+        if repeat and duration > 0:
+            t = elapsed_min % duration
+        elif duration > 0:
+            t = max(0.0, min(elapsed_min, duration))
+
+        value = profile_value_linear(prof_det, t, standby)
+        return add_noise(value) if add_random_noise else float(value)
+
+    # Not in cycle: device is ON but idle -> standby
+    return standby
 
 
-#Returns the device_id to look for in smartmeter CSVs.
+
 def _csv_id_for_device(device_name: str) -> str:
+    """Map the device name to the CSV ID used in smartmeter logs."""
     return DEVICE_ID_BY_SIM_NAME.get(device_name, device_name)
 
-#Load all smartmeter CSVs for this device_id and return mean power (W)
+
+
 def _real_mean_power_for_device(device_name: str, logs_dir: str = "logs") -> Optional[float]:
+    """Return the real mean power consumption for a device from smartmeter logs."""
     csv_id = _csv_id_for_device(device_name)
     df = smartmeter.load_power_by_device_id_any_csv(csv_id, logs_dir=logs_dir)
     if df.empty:
         return None
-    # 'value' column contains power in W
     return float(df["value"].mean())
 
-#Pick the computer profile whose target_mean is closest to the real mean power of this device (from smartmeter logs).
+
+
 def _choose_pc_profile_for_device(device_name: str) -> Optional[str]:
+    """Choose the best matching PC profile for the given device based on real mean power."""
     if device_name in _SELECTED_PC_PROFILE_BY_DEVICE:
         return _SELECTED_PC_PROFILE_BY_DEVICE[device_name]
 
     mean_power = _real_mean_power_for_device(device_name)
-    print(f"[PC profile] device={device_name}, real mean power={mean_power}")  # DEBUG
 
     if mean_power is None:
         _SELECTED_PC_PROFILE_BY_DEVICE[device_name] = None
@@ -217,11 +247,9 @@ def _choose_pc_profile_for_device(device_name: str) -> Optional[str]:
     for name, prof in COMPUTER_PROFILES.items():
         target = float(prof.get("target_mean", prof.get("standby", 0.0)))
         delta = abs(target - mean_power)
-        print(f"  candidate {name}: target_mean={target}, delta={delta}")     # DEBUG
         if best_delta is None or delta < best_delta:
             best_delta = delta
             best_name = name
 
-    print(f"[PC profile] chosen {best_name} for {device_name}\n")              # DEBUG
     _SELECTED_PC_PROFILE_BY_DEVICE[device_name] = best_name
     return best_name

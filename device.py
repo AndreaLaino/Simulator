@@ -17,6 +17,8 @@ def get_device_params(device_type):
     }
     return params.get(device_type, {"power": 100, "min_consumption": 50, "max_consumption": 100})
 
+
+
 class DeviceDialog(simpledialog.Dialog):
     def body(self, master):
         tk.Label(master, text="Device name:").grid(row=0)
@@ -50,6 +52,8 @@ class DeviceDialog(simpledialog.Dialog):
         max_consumption = params["max_consumption"]
         self.result = (name, type, power, min_consumption, max_consumption)
 
+
+
 def add_device(canvas, event, load_active):
     x = int(canvas.canvasx(event.x))
     y = int(canvas.canvasy(event.y))
@@ -64,6 +68,8 @@ def add_device(canvas, event, load_active):
             devices.append(device)
 
         draw_device(canvas, device)
+
+
 
 def draw_device(canvas, device):
     name, x, y, type, power, state, *_ = device

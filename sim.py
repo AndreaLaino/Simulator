@@ -1,3 +1,4 @@
+#sim.py
 from PIL import Image, ImageTk
 from datetime import datetime, timedelta
 from wall import walls_coordinates
@@ -202,6 +203,7 @@ def interaction(canvas, timer_app_instance, event, load_active, activity_label):
         d_devices[:] = d_devices
 
 def toggle_device_state(canvas, event, sensor_states, load_active, timer_app_instance, x=None, y=None):
+    """toggle device state on click and log the event"""
     if x is None or y is None:
         x = int(canvas.canvasx(event.x))
         y = int(canvas.canvasy(event.y))
@@ -260,10 +262,11 @@ def toggle_device_state(canvas, event, sensor_states, load_active, timer_app_ins
                     update_sensor_states(sensor_name, sensor_state, sensor_states, current_timestamp)
             break
 
-def update_sensors(canvas, timer_app_instance, load_active, activity_label):
+def update_sensors(canvas, timer_app_instance, load_active, activity_label, *, schedule_next=True, force=False):
+    """update sensors based on elapsed time and log events"""
     global sensors, read_sensors, last_temp_elapsed
 
-    if not timer_app_instance.is_running:
+    if (not timer_app_instance.is_running) and (not force):
         print("Error: Simulation not started.")
         return
 
@@ -281,8 +284,12 @@ def update_sensors(canvas, timer_app_instance, load_active, activity_label):
     current_elapsed = timer_app_instance.elapsed_time
     if last_temp_elapsed is None:
         last_temp_elapsed = current_elapsed
+
     delta_seconds = (current_elapsed - last_temp_elapsed).total_seconds()
     last_temp_elapsed = current_elapsed
+
+    if delta_seconds <= 0:
+        delta_seconds = 1.0
 
     simulated_time = timer_app_instance.get_simulated_time()
     current_date = timer_app_instance.current_date
@@ -291,18 +298,20 @@ def update_sensors(canvas, timer_app_instance, load_active, activity_label):
 
     current_datetime = get_simulation_datetime(timer_app_instance)
 
-    # For Smart Meter: Avoid double hangers in the same timestamp
+    # Dedup helper for smartmeter
     def _append_unique_sample(buffer, ts, state_val, consumption_val=None):
         def _to_float(v):
             try:
                 return float(round(float(v), 2))
             except Exception:
                 return float("nan")
+
         state_float = _to_float(state_val)
         buffer.setdefault('time', [])
         buffer.setdefault('state', [])
         if 'consumption' in buffer:
             buffer.setdefault('consumption', [])
+
         if buffer['time'] and buffer['time'][-1] == ts:
             buffer['state'][-1] = state_float
             if 'consumption' in buffer and consumption_val is not None:
@@ -318,6 +327,7 @@ def update_sensors(canvas, timer_app_instance, load_active, activity_label):
         if s_sensors[i][3] == "Temperature":
             sensor = s_sensors[i]
             sensor_x, sensor_y = sensor[1], sensor[2]
+
             oven_active = False
             for device in d_devices:
                 if device[3] == "Oven" and device[5] == 1:
@@ -325,8 +335,11 @@ def update_sensors(canvas, timer_app_instance, load_active, activity_label):
                     if dist <= OVEN_DISTANCE_THRESHOLD:
                         oven_active = True
                         break
+
             heating_factor = 1 if oven_active else 0
-            sensor_name, new_state, s_sensors = changeTemperature(canvas, sensor, s_sensors, heating_factor, delta_seconds)
+            sensor_name, new_state, s_sensors = changeTemperature(
+                canvas, sensor, s_sensors, heating_factor, delta_seconds
+            )
             update_sensor_states(sensor_name, new_state, sensor_states, timestamp)
 
     # --- Smart Meter ---
@@ -334,7 +347,9 @@ def update_sensors(canvas, timer_app_instance, load_active, activity_label):
     for i in range(len(s_sensors)):
         if s_sensors[i][3] == "Smart Meter":
             sensor = s_sensors[i]
-            sensor_name, new_consumption, s_sensors = changeSmartMeter(canvas, sensor, s_sensors, d_devices, delta_seconds, current_datetime)
+            sensor_name, new_consumption, s_sensors = changeSmartMeter(
+                canvas, sensor, s_sensors, d_devices, delta_seconds, current_datetime
+            )
 
             sensor_type = "Smart Meter"
             associated_device = sensor[10]
@@ -373,19 +388,17 @@ def update_sensors(canvas, timer_app_instance, load_active, activity_label):
             )
 
             updated_smartmeters.add(sensor_name)
-            print(f"[DEBUG] Smart Meter state updated: {sensor_name} -> {float(round(new_consumption, 2))} W (device: {associated_device})")
 
-    # Saving updated lists
+    # save updates
     if load_active:
         read_sensors = s_sensors
     else:
         sensors = s_sensors
 
-    # Dynamic device consumption
+    # update devices consumption
     update_devices_consumption(canvas, d_devices, delta_seconds, timer_app_instance)
 
-    # Current snapshot for each device monitored by a Smart Meter
-    # Avoid double samples in the same second using ‘updated_smartmeters’
+    # snapshot device->smartmeter 
     for device in d_devices:
         dev_name, _, _, dev_type, _, state, _, _, current_cons, _ = device
         for sensor in s_sensors:
@@ -425,12 +438,9 @@ def update_sensors(canvas, timer_app_instance, load_active, activity_label):
                     f"device:{dev_name}"
                 )
 
-    try:
-        do_sample = PER_SECOND_SENSOR_SAMPLING
-        types_to_sample = PER_SECOND_SENSOR_TYPES
-    except NameError:
-        do_sample = True
-        types_to_sample = {"PIR", "Switch", "Weight"}
+    # per-second sampling (PIR/Switch/Weight)
+    do_sample = PER_SECOND_SENSOR_SAMPLING
+    types_to_sample = PER_SECOND_SENSOR_TYPES
 
     if do_sample:
         for sensor in s_sensors:
@@ -449,10 +459,10 @@ def update_sensors(canvas, timer_app_instance, load_active, activity_label):
                     sensor_states[name].setdefault('type', type)
 
                 append_unique_binary(sensor_states[name], timestamp, current_state, type)
-
-                # optional: log even discrete per second (we keep INT 0/1)
                 log_sensor_event(timestamp, name, type, sx, sy, int(current_state), "per-second-sample")
 
-    # Recursive loop if simulation active
-    if timer_app_instance.is_running:
+    # normal scheduling
+    if schedule_next and timer_app_instance.is_running:
         canvas.after(1000, lambda: update_sensors(canvas, timer_app_instance, load_active, activity_label))
+
+        

@@ -9,7 +9,7 @@ import pandas as pd
 logger = logging.getLogger("smartmeter")
 logger.setLevel(logging.INFO)
 
-DEFAULT_INTERVAL = 10  # secondi
+DEFAULT_INTERVAL = 60  # secondi
 LOGGERS: Dict[str, "SmartMeterLogger"] = {}  # device_name -> logger
 
 # Regole per derivare un ID canonico (case-insensitive) dal nome del device
@@ -155,7 +155,7 @@ class SmartMeterLogger:
                 if self._stop_event.is_set(): break
                 time.sleep(1)
 
-# -------- API multi-dispositivo --------
+# multi-device  API 
 
 def start_logger(
     device_name: Optional[str],
@@ -192,7 +192,7 @@ def stop_all():
     for name in list(LOGGERS.keys()):
         stop_logger(name)
 
-# -------- Lettura dati --------
+# ddata loading functions
 
 def load_csv(csv_path: str, device: Optional[str] = None) -> dict:
     out = {}

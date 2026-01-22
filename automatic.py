@@ -494,13 +494,13 @@ def launch_automatic_interface(ctx: AppContext):
 
     def back_to_main():
         try:
-            # Se esiste il frame dell'interfaccia automatica, DISTRUGGILO
+            # Recreate the main interface from main.py
             if getattr(ctx, "auto_frame", None) is not None:
                 ctx.auto_frame.destroy()
-                ctx.auto_frame = None  # opzionale ma pulito
+                ctx.auto_frame = None 
 
             from main import rebuild_main_interface
-            rebuild_main_interface(ctx)  # torni alla home
+            rebuild_main_interface(ctx)  # Rebuild main UI
         except Exception as e:
             messagebox.showerror("Error", f"Unable to return to the initial interface:\n{e}")
 

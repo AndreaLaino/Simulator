@@ -33,7 +33,6 @@ COMPUTER_PROFILES: Dict[str, dict] = {
         },
     },
 
-    # You can reuse your old "Computer" profile here as a "high" profile
     "PC_high": {
         "standby": 103.5,
         "target_mean": 100.0,
