@@ -11,6 +11,7 @@ logger.setLevel(logging.INFO)
 
 DEFAULT_INTERVAL = 60  # secondi
 LOGGERS: Dict[str, "SmartMeterLogger"] = {}  # device_name -> logger
+CSV_WRITE_LOCKS: Dict[str, threading.Lock] = {}  # filepath -> lock (un lock per file)
 
 # Regole per derivare un ID canonico (case-insensitive) dal nome del device
 DEFAULT_ID_RULES: List[Tuple[str, str]] = [
@@ -142,12 +143,18 @@ class SmartMeterLogger:
                 if v is None and p is not None and a is not None and a > 1e-3:
                     v = p / a
 
-                ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                with open(self.csv_path, "a", newline="", encoding="utf-8") as f:
-                    csv.writer(f).writerow([ts, self.device_name, self.device_id, self.shelly_ip,
-                                            "" if p is None else p,
-                                            "" if v is None else v,
-                                            "" if a is None else a])
+                ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]  # con millisecondi
+                
+                # Lock per file specifico (non globale)
+                if self.csv_path not in CSV_WRITE_LOCKS:
+                    CSV_WRITE_LOCKS[self.csv_path] = threading.Lock()
+                
+                with CSV_WRITE_LOCKS[self.csv_path]:
+                    with open(self.csv_path, "a", newline="", encoding="utf-8") as f:
+                        csv.writer(f).writerow([ts, self.device_name, self.device_id, self.shelly_ip,
+                                                "" if p is None else p,
+                                                "" if v is None else v,
+                                                "" if a is None else a])
             except Exception as e:
                 logger.warning(f"[{self.device_name}] polling error: {e}")
 
@@ -225,7 +232,7 @@ def load_power_df(csv_path: str, device: Optional[str] = None, rule: str = "1min
     if not rows:
         return pd.DataFrame()
     df = pd.DataFrame(rows)
-    df["timestamp"] = pd.to_datetime(df["timestamp"], format="%Y-%m-%d %H:%M:%S", errors="coerce")
+    df["timestamp"] = pd.to_datetime(df["timestamp"], format="%Y-%m-%d %H:%M:%S.%f", errors="coerce")
     df = df.dropna(subset=["timestamp"]).sort_values("timestamp").set_index("timestamp")
     return df.resample(rule).mean() if agg == "mean" else df.resample(rule).median()
 

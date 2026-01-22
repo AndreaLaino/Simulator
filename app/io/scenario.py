@@ -150,48 +150,72 @@ def _parse_json_to_records(content: str, data_type: str) -> list:
 
 
 def _save_records_to_csv(records: list, filepath: str, data_type: str, device_name: str = "", ip: str = "", append_mode: bool = False) -> None:
-    """Save records to CSV file. If append_mode is True, append to existing file (skip headers)."""
+    """Save records to CSV file. If append_mode is True, append to existing file (skip headers) and deduplicate by timestamp."""
     if not records:
         return
     
-    mode = 'a' if append_mode else 'w'
     file_exists = os.path.exists(filepath)
     
-    with open(filepath, mode, newline='', encoding='utf-8') as f:
-        writer = csv.writer(f, quoting=csv.QUOTE_NONE, escapechar='\\')
-        
-        # Only write headers if creating new file or not in append mode
-        if not append_mode or not file_exists:
-            if data_type == "smartmeter":
-                writer.writerow(['timestamp_iso', 'device', 'device_id', 'ip', 'power_W', 'voltage_V', 'current_A'])
-            elif data_type == "dht":
-                writer.writerow(['timestamp_iso', 'label', 'gpio', 'temp_C', 'hum_%'])
-        
-        if data_type == "smartmeter":
-            for r in records:
-                if 'raw_csv' in r:
-                    # Skip header if it's raw CSV
-                    continue
-                writer.writerow([
-                    r.get('timestamp', ''),
-                    device_name,  # device from base_name
-                    device_name,  # device_id from base_name
-                    ip,  # ip from user input
+    # If appending, load existing data into dict (keyed by timestamp for dedup)
+    existing_data = {}
+    if append_mode and file_exists:
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                reader = csv.reader(f)
+                next(reader, None)  # Skip header
+                for row in reader:
+                    if row and row[0]:  # row[0] is timestamp
+                        existing_data[row[0]] = row
+        except Exception as e:
+            logger.warning("Failed to read existing file for dedup: %s", e)
+    
+    # Collect new records into dict (keyed by timestamp)
+    new_data = {}
+    if data_type == "smartmeter":
+        for r in records:
+            if 'raw_csv' in r:
+                continue
+            ts = r.get('timestamp', '')
+            if ts:
+                new_data[ts] = [
+                    ts,
+                    device_name,
+                    device_name,
+                    ip,
                     r.get('power', ''),
                     r.get('voltage', ''),
                     r.get('current', '')
-                ])
-        elif data_type == "dht":
-            for r in records:
-                if 'raw_csv' in r:
-                    continue
-                writer.writerow([
-                    r.get('timestamp', ''),
+                ]
+    elif data_type == "dht":
+        for r in records:
+            if 'raw_csv' in r:
+                continue
+            ts = r.get('timestamp', '')
+            if ts:
+                new_data[ts] = [
+                    ts,
                     r.get('label', ''),
                     r.get('gpio', ''),
                     r.get('temperature', ''),
                     r.get('humidity', '')
-                ])
+                ]
+    
+    # Merge: existing_data + new_data (new data overwrites duplicates)
+    merged_data = {**existing_data, **new_data}
+    
+    # Write merged data
+    with open(filepath, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.writer(f, quoting=csv.QUOTE_NONE, escapechar='\\')
+        
+        # Write header
+        if data_type == "smartmeter":
+            writer.writerow(['timestamp_iso', 'device', 'device_id', 'ip', 'power_W', 'voltage_V', 'current_A'])
+        elif data_type == "dht":
+            writer.writerow(['timestamp_iso', 'label', 'gpio', 'temp_C', 'hum_%'])
+        
+        # Write all merged rows (sorted by timestamp)
+        for ts in sorted(merged_data.keys()):
+            writer.writerow(merged_data[ts])
 
 
 def _load_scenario(ctx: AppContext, canvas, filename: str) -> None:
@@ -608,7 +632,6 @@ def import_csv_from_s3(parent=None) -> None:
             
             content = importer.download_csv_file(bucket, s3_key)
             if not content:
-                logger.warning("Failed to download %s", s3_key)
                 failed += 1
                 continue
 
@@ -616,7 +639,6 @@ def import_csv_from_s3(parent=None) -> None:
             if s3_key.endswith(('.json', '.txt', '.log')):
                 records = _parse_json_to_records(content, prefix)
                 all_records.extend(records)
-                logger.info("Parsed %d records from JSON file: %s", len(records), s3_key)
             else:
                 # It's already CSV, just append content
                 all_records.append({'raw_csv': content})
@@ -647,7 +669,7 @@ def import_csv_from_s3(parent=None) -> None:
         device_ip = (device_ip or "").strip()
     
     # Save all data to a single CSV file
-    dest_name = f"{prefix}_{base_name}.csv"
+    dest_name = f"{base_name}.csv"
     dest_path = os.path.join(logs_dir, dest_name)
     
     # Ask user if they want to overwrite or append
@@ -714,7 +736,7 @@ def import_csv(parent=None) -> None:
     logs_dir = "logs"
     os.makedirs(logs_dir, exist_ok=True)
 
-    dest_name = f"{prefix}_{base_name}.csv"
+    dest_name = f"{base_name}.csv"
     dest_path = os.path.join(logs_dir, dest_name)
     
     # Ask user if they want to overwrite or append (only if destination exists)
@@ -723,40 +745,60 @@ def import_csv(parent=None) -> None:
         return  # User cancelled
     
     append_mode = (action == 'append')
+    
+    # If appending, load existing data into dict (keyed by timestamp for dedup)
+    existing_data = {}
+    if append_mode and os.path.exists(dest_path):
+        try:
+            with open(dest_path, 'r', newline='', encoding='utf-8') as f:
+                reader = csv.reader(f)
+                header = next(reader, None)
+                for row in reader:
+                    if row and row[0]:  # row[0] is timestamp
+                        existing_data[row[0]] = row  # Keep latest (will be overwritten if duplicate)
+        except Exception as e:
+            logger.warning("Failed to read existing file for dedup: %s", e)
+    
+    # Collect all new data
+    all_new_data = {}
     imported = 0
     for src in files:
         try:
             with open(src, 'r', newline='', encoding='utf-8') as src_file:
                 reader = csv.reader(src_file)
-                records = list(reader)
-            
-            # Skip header on first file or if not appending
-            if imported == 0 and not append_mode:
-                data_rows = records
-            elif imported == 0 and append_mode:
-                data_rows = records[1:] if len(records) > 1 else records
-            else:
-                # For subsequent files, always skip header
-                data_rows = records[1:] if len(records) > 1 else records
-            
-            # Write or append records
-            mode = 'a' if (append_mode or imported > 0) else 'w'
-            write_header = (imported == 0 and not append_mode) or (imported == 0 and append_mode and not os.path.exists(dest_path))
-            
-            with open(dest_path, mode, newline='', encoding='utf-8') as dest_file:
-                writer = csv.writer(dest_file)
-                if write_header and len(records) > 0:
-                    writer.writerow(records[0])
-                for row in (records if write_header else data_rows):
-                    if row:  # Skip empty rows
-                        writer.writerow(row)
+                header = next(reader, None)  # Skip header
+                for row in reader:
+                    if row and row[0]:  # row[0] is timestamp
+                        all_new_data[row[0]] = row  # Keep latest within import
             
             logger.info("Imported %s -> %s (mode: %s)", src, dest_path, action if imported == 0 else 'append')
             imported += 1
         except Exception as e:
             logger.exception("Failed to import %s: %s", src, e)
+    
+    # Merge: existing_data + all_new_data (new data overwrites duplicates)
+    merged_data = {**existing_data, **all_new_data}
+    
+    # Write merged data to file
+    try:
+        with open(dest_path, 'w', newline='', encoding='utf-8') as dest_file:
+            writer = csv.writer(dest_file)
+            # Write header
+            if files:
+                with open(files[0], 'r', newline='', encoding='utf-8') as f:
+                    reader = csv.reader(f)
+                    header = next(reader, None)
+                    if header:
+                        writer.writerow(header)
+            # Write all merged rows (sorted by timestamp)
+            for ts in sorted(merged_data.keys()):
+                writer.writerow(merged_data[ts])
+    except Exception as e:
+        logger.exception("Failed to write merged data: %s", e)
+        messagebox.showerror("Import Failed", f"Error writing data: {e}")
+        return
 
-    messagebox.showinfo("Import", f"Importati {imported} file in {logs_dir}/\nMode: {action.capitalize()}")
+    messagebox.showinfo("Import", f"Importati {imported} file in {logs_dir}/\nMode: {action.capitalize()}\nDedup: timestamp duplicates kept as latest")
 def export_simulation_csv() -> None:
     """Export the latest 'interactions.csv' from logs to a chosen location."""
     logs_root = "logs"

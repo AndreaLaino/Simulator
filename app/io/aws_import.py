@@ -98,7 +98,6 @@ class AWSS3Importer:
         try:
             response = self.s3_client.get_object(Bucket=bucket_name, Key=key)
             content = response['Body'].read().decode('utf-8')
-            logger.info(f"Downloaded file '{key}' from bucket '{bucket_name}'")
             return content
         except Exception as e:
             logger.error(f"Error downloading '{key}' from '{bucket_name}': {e}")
