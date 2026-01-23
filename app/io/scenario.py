@@ -105,7 +105,7 @@ logger = setup_logging("io.scenario")
 
 
 def _convert_timestamp(ts):
-    """Convert Unix timestamp (seconds or milliseconds) to ISO format: YYYY-MM-DD HH:MM:SS"""
+    """Convert Unix timestamp (seconds or milliseconds) to ISO format: YYYY-MM-DD HH:MM:SS.mmm"""
     if not ts:
         return ""
     try:
@@ -113,7 +113,7 @@ def _convert_timestamp(ts):
         if isinstance(ts, (int, float)) and ts > 10000000000:
             ts = ts / 1000
         dt = datetime.fromtimestamp(float(ts))
-        return dt.strftime("%Y-%m-%d %H:%M:%S")
+        return dt.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]  # con millisecondi
     except:
         return ""
 
@@ -164,7 +164,7 @@ def _save_records_to_csv(records: list, filepath: str, data_type: str, device_na
                 reader = csv.reader(f)
                 next(reader, None)  # Skip header
                 for row in reader:
-                    if row and row[0]:  # row[0] is timestamp
+                    if row and row[0] and row[0].strip():  # Valida timestamp non vuoto
                         existing_data[row[0]] = row
         except Exception as e:
             logger.warning("Failed to read existing file for dedup: %s", e)
@@ -175,8 +175,8 @@ def _save_records_to_csv(records: list, filepath: str, data_type: str, device_na
         for r in records:
             if 'raw_csv' in r:
                 continue
-            ts = r.get('timestamp', '')
-            if ts:
+            ts = r.get('timestamp', '').strip()
+            if ts:  # Valida timestamp non vuoto
                 new_data[ts] = [
                     ts,
                     device_name,
@@ -190,8 +190,8 @@ def _save_records_to_csv(records: list, filepath: str, data_type: str, device_na
         for r in records:
             if 'raw_csv' in r:
                 continue
-            ts = r.get('timestamp', '')
-            if ts:
+            ts = r.get('timestamp', '').strip()
+            if ts:  # Valida timestamp non vuoto
                 new_data[ts] = [
                     ts,
                     r.get('label', ''),
@@ -754,8 +754,8 @@ def import_csv(parent=None) -> None:
                 reader = csv.reader(f)
                 header = next(reader, None)
                 for row in reader:
-                    if row and row[0]:  # row[0] is timestamp
-                        existing_data[row[0]] = row  # Keep latest (will be overwritten if duplicate)
+                    if row and row[0] and row[0].strip():  # Valida timestamp
+                        existing_data[row[0]] = row
         except Exception as e:
             logger.warning("Failed to read existing file for dedup: %s", e)
     
@@ -768,7 +768,7 @@ def import_csv(parent=None) -> None:
                 reader = csv.reader(src_file)
                 header = next(reader, None)  # Skip header
                 for row in reader:
-                    if row and row[0]:  # row[0] is timestamp
+                    if row and row[0] and row[0].strip():  # Valida timestamp
                         all_new_data[row[0]] = row  # Keep latest within import
             
             logger.info("Imported %s -> %s (mode: %s)", src, dest_path, action if imported == 0 else 'append')

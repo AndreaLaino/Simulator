@@ -138,7 +138,7 @@ def open_bind_ip_ui(root_win: tk.Tk, sensor_states: dict):
                     start_logger(
                         device_name=sensor_name, 
                         ip=ip,
-                        interval=10,
+                        interval=60,
                         device_id=sensor_name  
                     )
                 except Exception as e:
@@ -206,7 +206,7 @@ def open_bind_dht_ui(root_win: tk.Tk, sensor_states: dict):
             if autostart.get():
                 try:
                     from dhtlogger import start_dht_logger
-                    start_dht_logger(sensor_label=name, gpio=gpio, interval=5)
+                    start_dht_logger(sensor_label=name, gpio=gpio, interval=60)
                     started.append((name, gpio))
                 except Exception as e:
                     logger.warning("Cannot start DHT logger on GPIO %s: %s", gpio, e)

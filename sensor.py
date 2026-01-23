@@ -13,6 +13,7 @@ import os, json
 from dhtlogger import load_temp_by_label_any_csv, load_temp_by_gpio_any_csv
 import pandas as pd
 from collections import deque
+from typing import Optional
 
 TEMP_RECENT: dict[str, deque] = {}
 
@@ -122,7 +123,96 @@ def _load_temp_series_for_sensor(sensor_name: str):
     )
     return TEMP_SERIES[sensor_name]
 
+def _get_intraday_pattern(sensor_name: str, time_of_day_minutes: float, window_days: int = 7) -> Optional[float]:
+    """
+    Usa i dati storici per trovare il pattern nella giornata.
+    
+    Cerca in tutti i giorni precedenti qual è il valore tipico a questa ora del giorno,
+    e ritorna la media ponderata (più recente = più peso).
+    
+    Args:
+        sensor_name: nome del sensore
+        time_of_day_minutes: minuti dalla mezzanotte (0-1440)
+        window_days: quanti giorni precedenti analizzare
+    
+    Returns:
+        valore predetto o None se non ci sono dati
+    """
+    df = None
+    mapping = _load_sensor_map()
+    cfg = mapping.get(sensor_name, {})
+    
+    # Prova caricamento
+    if isinstance(cfg, dict) and cfg.get("by") == "dht":
+        gpio = cfg.get("gpio")
+        if gpio is not None:
+            try:
+                df = load_temp_by_gpio_any_csv(int(gpio))
+            except Exception:
+                pass
+    
+    if df is None or df.empty:
+        try:
+            df = load_temp_by_label_any_csv(sensor_name)
+        except Exception:
+            pass
+    
+    if df is None or df.empty or "value" not in df.columns:
+        return None
+    
+    df = df.dropna(subset=["value"])
+    if df.empty:
+        return None
+    
+    # Aggiungi colonna con ora del giorno (minuti dalla mezzanotte) e giorno
+    if not isinstance(df.index, pd.DatetimeIndex):
+        return None
+    
+    df_copy = df.copy()
+    df_copy["hour_of_day"] = (df_copy.index.hour * 60 + df_copy.index.minute).astype(float)
+    df_copy["day"] = df_copy.index.date
+    
+    # Trova valori simili (entro ±30 minuti dall'ora desiderata)
+    tolerance_min = 30
+    candidates = df_copy[
+        (df_copy["hour_of_day"] >= time_of_day_minutes - tolerance_min) &
+        (df_copy["hour_of_day"] <= time_of_day_minutes + tolerance_min)
+    ]
+    
+    if candidates.empty:
+        return None
+    
+    # Calcola la media ponderata (giorni più recenti hanno peso maggiore)
+    unique_days = candidates["day"].unique()
+    if len(unique_days) > window_days:
+        unique_days = unique_days[-window_days:]
+    
+    weighted_sum = 0.0
+    weight_total = 0.0
+    
+    for idx, day in enumerate(unique_days):
+        day_data = candidates[candidates["day"] == day]["value"]
+        if not day_data.empty:
+            day_mean = float(day_data.mean())
+            # Peso: giorni più recenti hanno peso maggiore (exponential)
+            weight = 2.0 ** (idx - len(unique_days) + 1)
+            weighted_sum += day_mean * weight
+            weight_total += weight
+    
+    if weight_total > 0:
+        return weighted_sum / weight_total
+    
+    return None
+
+
 def get_replay_temperature(sensor_name: str, sim_minutes: float):
+    """
+    Replay della temperatura basato su dati storici.
+    
+    Logica:
+    - Se sim_minutes è entro i dati disponibili -> replay diretto (interpolazione)
+    - Se sim_minutes è oltre i dati -> usa il pattern intraday per predire
+    """
     series = _load_temp_series_for_sensor(sensor_name)
     if not series:
         return None
@@ -131,29 +221,46 @@ def get_replay_temperature(sensor_name: str, sim_minutes: float):
     if not times or not values:
         return None
 
-    # before first
+    # Before first
     if sim_minutes <= times[0]:
         return float(values[0])
 
-    # AFTER LAST: loop within the available period (repeat the day)
-    if sim_minutes >= times[-1]:
-        period = times[-1] - times[0]
-        if period > 0:
-            sim_minutes = times[0] + ((sim_minutes - times[0]) % period)
-        else:
-            return float(values[-1])
-
-    # linear interpolation
-    for i in range(len(times) - 1):
-        t1, t2 = times[i], times[i + 1]
-        if t1 <= sim_minutes <= t2:
-            v1, v2 = values[i], values[i + 1]
-            if t2 == t1:
-                return float(v1)
-            alpha = (sim_minutes - t1) / (t2 - t1)
-            return float(v1 + alpha * (v2 - v1))
-
-    return float(values[-1])
+    # All'interno del range disponibile: interpolazione diretta
+    if sim_minutes <= times[-1]:
+        for i in range(len(times) - 1):
+            t1, t2 = times[i], times[i + 1]
+            if t1 <= sim_minutes <= t2:
+                v1, v2 = values[i], values[i + 1]
+                if t2 == t1:
+                    return float(v1)
+                alpha = (sim_minutes - t1) / (t2 - t1)
+                return float(v1 + alpha * (v2 - v1))
+        return float(values[-1])
+    
+    # AFTER LAST: usa il pattern intraday per predire
+    # Calcola a che ora della giornata siamo (in minuti dalla mezzanotte)
+    total_series_minutes = times[-1]
+    time_of_day = (total_series_minutes % (24 * 60))  # modulo 1440 (minuti in un giorno)
+    
+    # Prova a trovare un pattern storico
+    predicted = _get_intraday_pattern(sensor_name, time_of_day)
+    if predicted is not None:
+        return float(predicted)
+    
+    # Fallback: usa l'ultimo valore noto + damping leggero
+    last_val = float(values[-1])
+    
+    # Calcola la pendenza degli ultimi valori per damping
+    if len(values) >= 3:
+        v_prev = float(values[-2])
+        v_last = float(values[-1])
+        slope = v_last - v_prev
+        # Dampizza la pendenza per extrapolazione
+        steps_beyond = sim_minutes - times[-1]
+        damped_slope = slope * (0.95 ** steps_beyond)  # exponential decay
+        return max(15.0, min(40.0, last_val + damped_slope))
+    
+    return last_val
 
 def get_sensor_params(sensor_type):
     params = {
@@ -424,6 +531,146 @@ def changeTemperature(canvas, sensor, sensors, heating_factor, delta_seconds, cu
     return name, new_state, updated
 
 
+def _get_intraday_power_pattern(associated_device: str, time_of_day_minutes: float, window_days: int = 7) -> Optional[float]:
+    """
+    Usa i dati storici dello smart meter per trovare il pattern di consumo nella giornata.
+    
+    Cerca in tutti i giorni precedenti qual è il consumo tipico a questa ora del giorno,
+    e ritorna la media ponderata (più recente = più peso).
+    
+    Args:
+        associated_device: nome del dispositivo associato (pc, wm, dw, etc.)
+        time_of_day_minutes: minuti dalla mezzanotte (0-1440)
+        window_days: quanti giorni precedenti analizzare
+    
+    Returns:
+        potenza predetta in Watt o None se non ci sono dati
+    """
+    try:
+        import smartmeter
+    except ImportError:
+        return None
+    
+    # Deriva il device_id dal nome
+    device_id = smartmeter.derive_device_id(associated_device)
+    
+    # Carica i dati storici
+    df = None
+    try:
+        df = smartmeter.load_power_by_device_id_any_csv(device_id, logs_dir="logs")
+    except Exception:
+        pass
+    
+    if df is None or df.empty or "value" not in df.columns:
+        return None
+    
+    df = df.dropna(subset=["value"])
+    if df.empty:
+        return None
+    
+    # Aggiungi colonna con ora del giorno (minuti dalla mezzanotte) e giorno
+    if not isinstance(df.index, pd.DatetimeIndex):
+        return None
+    
+    df_copy = df.copy()
+    df_copy["hour_of_day"] = (df_copy.index.hour * 60 + df_copy.index.minute).astype(float)
+    df_copy["day"] = df_copy.index.date
+    
+    # Trova valori simili (entro ±30 minuti dall'ora desiderata)
+    tolerance_min = 30
+    candidates = df_copy[
+        (df_copy["hour_of_day"] >= time_of_day_minutes - tolerance_min) &
+        (df_copy["hour_of_day"] <= time_of_day_minutes + tolerance_min)
+    ]
+    
+    if candidates.empty:
+        return None
+    
+    # Calcola la media ponderata (giorni più recenti hanno peso maggiore)
+    unique_days = candidates["day"].unique()
+    if len(unique_days) > window_days:
+        unique_days = unique_days[-window_days:]
+    
+    weighted_sum = 0.0
+    weight_total = 0.0
+    
+    for idx, day in enumerate(unique_days):
+        day_data = candidates[candidates["day"] == day]["value"]
+        if not day_data.empty:
+            day_mean = float(day_data.mean())
+            # Peso: giorni più recenti hanno peso maggiore (exponential)
+            weight = 2.0 ** (idx - len(unique_days) + 1)
+            weighted_sum += day_mean * weight
+            weight_total += weight
+    
+    if weight_total > 0:
+        return weighted_sum / weight_total
+    
+    return None
+
+
+def get_replay_smart_meter_consumption(associated_device: str, sim_minutes: float) -> Optional[float]:
+    """
+    Replay del consumo dello smart meter basato su dati storici.
+    
+    Logica:
+    - Se sim_minutes è entro i dati disponibili -> replay diretto (interpolazione)
+    - Se sim_minutes è oltre i dati -> usa il pattern intraday per predire
+    """
+    try:
+        import smartmeter
+    except ImportError:
+        return None
+    
+    device_id = smartmeter.derive_device_id(associated_device)
+    
+    try:
+        df = smartmeter.load_power_by_device_id_any_csv(device_id, logs_dir="logs")
+    except Exception:
+        return None
+    
+    if df is None or df.empty or "value" not in df.columns:
+        return None
+    
+    df_sorted = df.sort_index()
+    if df_sorted.empty:
+        return None
+    
+    # Converti in minuti relativi dal primo valore
+    t0 = df_sorted.index[0]
+    rel_minutes = (df_sorted.index - t0).total_seconds() / 60.0
+    times = rel_minutes.to_list()
+    values = df_sorted["value"].astype(float).to_list()
+    
+    # Before first
+    if sim_minutes <= times[0]:
+        return float(values[0])
+    
+    # All'interno del range disponibile: interpolazione diretta
+    if sim_minutes <= times[-1]:
+        for i in range(len(times) - 1):
+            t1, t2 = times[i], times[i + 1]
+            if t1 <= sim_minutes <= t2:
+                v1, v2 = values[i], values[i + 1]
+                if t2 == t1:
+                    return float(v1)
+                alpha = (sim_minutes - t1) / (t2 - t1)
+                return float(v1 + alpha * (v2 - v1))
+        return float(values[-1])
+    
+    # AFTER LAST: usa il pattern intraday per predire
+    total_series_minutes = times[-1]
+    time_of_day = (total_series_minutes % (24 * 60))
+    
+    # Prova a trovare un pattern storico
+    predicted = _get_intraday_power_pattern(associated_device, time_of_day)
+    if predicted is not None:
+        return float(predicted)
+    
+    # Fallback: usa l'ultimo valore noto
+    return float(values[-1])
+
+
 def changeSmartMeter(canvas, sensor, sensors, devices, delta_seconds, current_datetime):
     if len(sensor) < 11:
         print(f"[WARN] Unexpected Smart Meter structure: {sensor}")
@@ -446,25 +693,49 @@ def changeSmartMeter(canvas, sensor, sensors, devices, delta_seconds, current_da
     new_consumption = 0.0
 
     if associated_device:
-        # searches for the associated device both among runtimes and among those loaded from files
-        associated_dev = next((d for d in devices if d[0] == associated_device), None)
-        if not associated_dev and devices:
-            associated_dev = next((d for d in devices if d[0] == associated_device), None)
-        if not associated_dev and devices_file:
-            associated_dev = next((d for d in devices_file if d[0] == associated_device), None)
-
-        if associated_dev:
-            dev_name, _, _, dev_type, _, dev_state, *_ = associated_dev
-
-            if dev_state == 1:
-                # get_device_consumption already handles:
-                # - active cycle -> profile
-                # - ON but idle  -> standby
-                new_consumption = get_device_consumption(
-                    dev_name, dev_type, current_datetime, active_cycles, dev_state
-                )
+        # 1) Prova prima la predizione intelligente basata su dati storici
+        if current_datetime:
+            # Calcola i minuti simulati dalla mezzanotte di quella giornata
+            time_of_day = (current_datetime.hour * 60 + current_datetime.minute)
+            # Calcola quanti giorni abbiamo simulato (possiamo fare cumulative, ma per ora prendiamo solo l'ora)
+            sim_minutes = time_of_day
+            
+            # Prova la predizione storica
+            replay_consumption = get_replay_smart_meter_consumption(associated_device, sim_minutes)
+            if replay_consumption is not None:
+                new_consumption = max(0.0, float(replay_consumption))
             else:
-                new_consumption = 0.0
+                # 2) Fallback: calcola dal dispositivo associato e cicli attivi
+                associated_dev = next((d for d in devices if d[0] == associated_device), None)
+                if not associated_dev and devices:
+                    associated_dev = next((d for d in devices if d[0] == associated_device), None)
+                if not associated_dev and devices_file:
+                    associated_dev = next((d for d in devices_file if d[0] == associated_device), None)
+
+                if associated_dev:
+                    dev_name, _, _, dev_type, _, dev_state, *_ = associated_dev
+                    if dev_state == 1:
+                        new_consumption = get_device_consumption(
+                            dev_name, dev_type, current_datetime, active_cycles, dev_state
+                        )
+                    else:
+                        new_consumption = 0.0
+        else:
+            # Se non abbiamo current_datetime, usa il metodo vecchio
+            associated_dev = next((d for d in devices if d[0] == associated_device), None)
+            if not associated_dev and devices:
+                associated_dev = next((d for d in devices if d[0] == associated_device), None)
+            if not associated_dev and devices_file:
+                associated_dev = next((d for d in devices_file if d[0] == associated_device), None)
+
+            if associated_dev:
+                dev_name, _, _, dev_type, _, dev_state, *_ = associated_dev
+                if dev_state == 1:
+                    new_consumption = get_device_consumption(
+                        dev_name, dev_type, current_datetime, active_cycles, dev_state
+                    )
+                else:
+                    new_consumption = 0.0
 
     # update the sensor array with new consumption
     updated = []
