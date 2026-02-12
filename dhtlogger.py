@@ -114,7 +114,7 @@ class DHTLogger:
                 h = float(h) if h is not None else None
                 return (t, h)
             except Exception as e:
-                logger.warning("[DHT '%s'] errore Adafruit_DHT: %s", self.label, e)
+                logger.warning("[DHT '%s'] Adafruit_DHT error: %s", self.label, e)
                 return (None, None)
 
         # No librery available
@@ -185,7 +185,7 @@ def load_temp_by_label_any_csv(label: str, logs_dir="logs") -> pd.DataFrame:
                     continue
     return _df_from_rows(rows)
 
-#fallback
+# fallback
 def load_temp_by_gpio_any_csv(gpio: int, logs_dir="logs") -> pd.DataFrame:
     """load temperature data for the given GPIO BCM pin from any CSV in logs_dir."""
     rows = []

@@ -18,43 +18,48 @@ class TimerApp:
         self.simulated_start_time = None
         self.advanced = False
         self.current_date = datetime.today().strftime("%Y-%m-%d")
+        self.advance_remaining = 0  # Track remaining seconds to advance
 
         self.timer_frame.columnconfigure(0, weight=1)
 
         self.label = tk.Label(
             self.timer_frame,
             text=f"Time: 00:00 \n Date: {self.current_date}",
-            font=("Helvetica", 16),
+            font=("Helvetica", 22),
             bg="lightgrey",
         )
-        self.label.grid(row=0, column=0, pady=(20, 10), padx=10, sticky="ew")
+        self.label.grid(row=0, column=0, pady=(25, 20), padx=5, sticky="ew")
 
         # Input for start time
         self.start_hour_label = tk.Label(
             self.timer_frame,
             text="Start Hour (HH:MM):",
-            font=("Helvetica", 10),
+            font=("Helvetica", 15),
             bg="lightgrey",
         )
-        self.start_hour_label.grid(row=1, column=0, pady=5, padx=15, sticky="w")
+        self.start_hour_label.grid(row=1, column=0, pady=(15, 10), padx=5, sticky="ew")
 
-        self.start_hour_entry = tk.Entry(self.timer_frame, font=("Helvetica", 12), width=10)
-        self.start_hour_entry.grid(row=2, column=0, pady=5, padx=15)
+        self.start_hour_entry = tk.Entry(self.timer_frame, font=("Helvetica", 16), width=15, justify="center")
+        self.start_hour_entry.grid(row=2, column=0, pady=(10, 20), padx=20, ipady=10, sticky="ew")
 
         # Insert current time formatted properly
         self.start_hour_entry.insert(0, datetime.now().strftime("%H:%M"))
 
         # Start/Stop Button
-        self.start_stop_button = tk.Button(self.timer_frame, text="Start", font=("Helvetica", 12), command=self.start_stop)
-        self.start_stop_button.grid(row=3, column=0, pady=5, padx=15, sticky="ew")
+        self.start_stop_button = tk.Button(self.timer_frame, text="Start", font=("Helvetica", 15, "bold"), command=self.start_stop)
+        self.start_stop_button.grid(row=3, column=0, pady=(15, 10), padx=20, sticky="ew", ipady=15)
 
-        # Advance 15 sec Button
-        self.advance_button = tk.Button(self.timer_frame, text="Advance 15 sec", font=("Helvetica", 12), command=self.advance_time)
-        self.advance_button.grid(row=5, column=0, pady=5, padx=15, sticky="ew")
+        # Advance 15 min Button
+        self.advance_button = tk.Button(self.timer_frame, text="Advance 15 min", font=("Helvetica", 15), command=self.advance_time)
+        self.advance_button.grid(row=5, column=0, pady=(15, 10), padx=20, sticky="ew", ipady=15)
+
+        # Advance 1 hour Button
+        self.advance_hour_button = tk.Button(self.timer_frame, text="Advance 1 hour", font=("Helvetica", 15), command=self.advance_hour)
+        self.advance_hour_button.grid(row=6, column=0, pady=(15, 10), padx=20, sticky="ew", ipady=15)
 
         # Reset Button
-        self.reset_button = tk.Button(self.timer_frame, text="Reset", font=("Helvetica", 12), command=self.reset)
-        self.reset_button.grid(row=6, column=0, pady=5, padx=15, sticky="ew")
+        self.reset_button = tk.Button(self.timer_frame, text="Reset", font=("Helvetica", 15), command=self.reset)
+        self.reset_button.grid(row=7, column=0, pady=(15, 25), padx=20, sticky="ew", ipady=15)
 
         self.update_timer()
 
@@ -89,24 +94,51 @@ class TimerApp:
                 self.stop_callback()
 
     def advance_time(self):
-        """Advance the simulated time by 15 simulated minutes."""
-        for _ in range(15): 
+        """Advance the simulated time by 15 simulated minutes with smooth batch processing."""
+        jump_seconds = 15  # 1 sec = 1 simulated minute
+        self.advance_remaining = jump_seconds
+        self._do_advance_batch()
+
+    def advance_hour(self):
+        """Advance the simulated time by 60 simulated minutes with smooth batch processing."""
+        jump_seconds = 60  # 1 sec = 1 simulated minute
+        self.advance_remaining = jump_seconds
+        self._do_advance_batch()
+
+    def _do_advance_batch(self):
+        """Process 10 seconds of advance per batch with 10ms delay for fast processing."""
+        if self.advance_remaining <= 0:
+            self.advanced = True
+            self.timer_frame.after(200, self.reset_flag)
+            return
+        
+        # Process up to 10 seconds per batch
+        batch_size = min(10, self.advance_remaining)
+        
+        for _ in range(batch_size):
+            # Advance by 1 second
             if self.is_running:
                 self.start_time -= timedelta(seconds=1)
-                self.elapsed_time = datetime.now() - self.start_time  
+                self.elapsed_time = datetime.now() - self.start_time
             else:
                 self.elapsed_time += timedelta(seconds=1)
-
+            
+            # Call the sensor update callback for this 1-second step
             if callable(self.on_advance_step):
                 self.on_advance_step(1)
-
-        self.advanced = True
+        
+        self.advance_remaining -= batch_size
+        
+        # Update display
         simulated_time = self.get_simulated_time()
         self.label.config(text=f"Time: {simulated_time} \n Date: {self.current_date}")
-        self.timer_frame.after(1000, self.reset_flag)
+        
+        # Schedule next batch with 10ms delay for faster processing
+        self.timer_frame.after(10, self._do_advance_batch)
 
     def reset_flag(self):
         self.advanced = False
+        self.advance_remaining = 0
 
     def get_simulated_time(self):
         if self.simulated_start_time is None:

@@ -10,21 +10,25 @@ from consumption_profiles import get_device_consumption, consumption_profiles
 from read import read_sensors as sensors_file
 from read import read_devices as devices_file
 import os, json
+import math
 from dhtlogger import load_temp_by_label_any_csv, load_temp_by_gpio_any_csv
 import pandas as pd
 from collections import deque
 from typing import Optional
+from models import Sensor, Device
 
 TEMP_RECENT: dict[str, deque] = {}
+TEMP_GREEN_UNTIL: dict[str, float] = {}
+TEMP_BASELINE: dict[str, float] = {}
 
 sensors = []
 add_point_enabled = False
 
 SENSOR_MAP_PATH = "sensor_map.json"
 
-# cache: per ogni sensore -> (lista_tempi_min, lista_valori_C)
-TEMP_SERIES: dict[str, tuple[list[float], list[float]]] = {}
-# tempo simulato (in "unità" di delta_seconds) per ogni sensore
+# cache: per sensor -> (datetimes_list, values_list_C)
+TEMP_SERIES: dict[str, Optional[tuple[list[datetime], list[float]]]] = {}
+# simulated time (in delta_seconds units) per sensor
 TEMP_SIM_MIN: dict[str, float] = {}
 
 def _load_sensor_map(path: str = SENSOR_MAP_PATH) -> dict:
@@ -43,33 +47,33 @@ def _sanitize(name: str) -> str:
 
 def _load_temp_series_for_sensor(sensor_name: str):
     """
-    Carica dal logger DHT la serie di temperatura per questo sensore.
-    Usa load_temp_by_label_any_csv(sensor_name), che è lo stesso
-    meccanismo che uso per i grafici 'reali'.
+    Load the DHT temperature series for this sensor.
+    Uses load_temp_by_label_any_csv(sensor_name), the same mechanism
+    used for the "real" graphs.
 
-    Restituisce:
+    Returns:
         (times, values)
-    dove:
-        times  = minuti relativi dal primo campione (float)
-        values = temperatura in °C (float)
-    oppure None se non c'è niente.
+    where:
+        times  = minutes relative to the first sample (float)
+        values = temperature in C (float)
+    or None if no data is available.
     """
     if not sensor_name:
         TEMP_SERIES[sensor_name] = None
         return None
 
-    # cache già caricata
+    # cache already loaded
     if sensor_name in TEMP_SERIES:
         return TEMP_SERIES[sensor_name]
 
-    # 1) prova per label 
+    # 1) try by label
     df = None
     try:
         df = load_temp_by_label_any_csv(sensor_name)
     except Exception as e:
-        print(f"[TEMP] load_temp_by_label_any_csv fallita per {sensor_name}: {e}")
+        print(f"[TEMP] load_temp_by_label_any_csv failed for {sensor_name}: {e}")
 
-    # 2) sennò fai per GPIO
+    # 2) fallback to GPIO
     if (df is None or df.empty or "value" not in df.columns):
         mapping = _load_sensor_map()
         cfg = mapping.get(sensor_name, {})
@@ -79,70 +83,68 @@ def _load_temp_series_for_sensor(sensor_name: str):
                 try:
                     df = load_temp_by_gpio_any_csv(int(gpio))
                 except Exception as e:
-                    print(f"[TEMP] load_temp_by_gpio_any_csv fallita per {sensor_name}: {e}")
+                    print(f"[TEMP] load_temp_by_gpio_any_csv failed for {sensor_name}: {e}")
 
     if df is None or df.empty or "value" not in df.columns:
-        print(f"[TEMP] nessuna serie trovata per {sensor_name}")
+        print(f"[TEMP] no series found for {sensor_name}")
         TEMP_SERIES[sensor_name] = None
         return None
 
     if df is None or df.empty or "value" not in df.columns:
-        print(f"[TEMP] nessuna serie trovata per {sensor_name}")
+        print(f"[TEMP] no series found for {sensor_name}")
         TEMP_SERIES[sensor_name] = None
         return None
 
-    # tieni solo valori validi (togli quelli che non legge a causa di bug e altri fattori)
+    # keep only valid values (drop unreadable entries)
     df = df.dropna(subset=["value"])
     if df.empty:
-        print(f"[TEMP] solo NaN per {sensor_name}")
+        print(f"[TEMP] only NaN values for {sensor_name}")
         TEMP_SERIES[sensor_name] = None
         return None
 
-    # faccia in modo tale che sia ordinato temporalmente
+    # ensure time ordering
     if not isinstance(df.index, pd.DatetimeIndex):
         try:
             df.index = pd.to_datetime(df.index, errors="coerce")
         except Exception as e:
-            print(f"[TEMP] impossibile convertire indice in datetime per {sensor_name}: {e}")
+            print(f"[TEMP] cannot convert index to datetime for {sensor_name}: {e}")
     df = df.sort_index()
 
     if df.empty:
         TEMP_SERIES[sensor_name] = None
         return None
 
-    # minuti relativi dal primo campione
-    t0 = df.index[0]
-    rel_minutes = (df.index - t0).total_seconds() / 60.0
-    times = rel_minutes.to_list()
+    # Store actual datetime objects (aligned to real timestamps, not relative minutes)
+    datetimes = df.index.to_list()
     values = df["value"].astype(float).to_list()
 
-    TEMP_SERIES[sensor_name] = (times, values)
+    TEMP_SERIES[sensor_name] = (datetimes, values)
     print(
-        f"[TEMP] {sensor_name}: {len(times)} campioni "
-        f"da {df.index[0]} a {df.index[-1]}"
+        f"[TEMP] {sensor_name}: {len(datetimes)} samples "
+        f"from {datetimes[0]} to {datetimes[-1]}"
     )
     return TEMP_SERIES[sensor_name]
 
 def _get_intraday_pattern(sensor_name: str, time_of_day_minutes: float, window_days: int = 7) -> Optional[float]:
     """
-    Usa i dati storici per trovare il pattern nella giornata.
-    
-    Cerca in tutti i giorni precedenti qual è il valore tipico a questa ora del giorno,
-    e ritorna la media ponderata (più recente = più peso).
-    
+    Use historical data to find the intraday pattern.
+
+    Looks across previous days for the typical value at this time of day,
+    and returns a weighted average (more recent = higher weight).
+
     Args:
-        sensor_name: nome del sensore
-        time_of_day_minutes: minuti dalla mezzanotte (0-1440)
-        window_days: quanti giorni precedenti analizzare
-    
+        sensor_name: sensor name
+        time_of_day_minutes: minutes since midnight (0-1440)
+        window_days: how many previous days to analyze
+
     Returns:
-        valore predetto o None se non ci sono dati
+        predicted value or None if no data is available
     """
     df = None
     mapping = _load_sensor_map()
     cfg = mapping.get(sensor_name, {})
     
-    # Prova caricamento
+    # Try to load data
     if isinstance(cfg, dict) and cfg.get("by") == "dht":
         gpio = cfg.get("gpio")
         if gpio is not None:
@@ -164,7 +166,7 @@ def _get_intraday_pattern(sensor_name: str, time_of_day_minutes: float, window_d
     if df.empty:
         return None
     
-    # Aggiungi colonna con ora del giorno (minuti dalla mezzanotte) e giorno
+    # Add hour-of-day (minutes since midnight) and day columns
     if not isinstance(df.index, pd.DatetimeIndex):
         return None
     
@@ -172,7 +174,7 @@ def _get_intraday_pattern(sensor_name: str, time_of_day_minutes: float, window_d
     df_copy["hour_of_day"] = (df_copy.index.hour * 60 + df_copy.index.minute).astype(float)
     df_copy["day"] = df_copy.index.date
     
-    # Trova valori simili (entro ±30 minuti dall'ora desiderata)
+    # Find similar values (within ±30 minutes)
     tolerance_min = 30
     candidates = df_copy[
         (df_copy["hour_of_day"] >= time_of_day_minutes - tolerance_min) &
@@ -182,7 +184,7 @@ def _get_intraday_pattern(sensor_name: str, time_of_day_minutes: float, window_d
     if candidates.empty:
         return None
     
-    # Calcola la media ponderata (giorni più recenti hanno peso maggiore)
+    # Weighted average (more recent days have higher weight)
     unique_days = candidates["day"].unique()
     if len(unique_days) > window_days:
         unique_days = unique_days[-window_days:]
@@ -194,7 +196,7 @@ def _get_intraday_pattern(sensor_name: str, time_of_day_minutes: float, window_d
         day_data = candidates[candidates["day"] == day]["value"]
         if not day_data.empty:
             day_mean = float(day_data.mean())
-            # Peso: giorni più recenti hanno peso maggiore (exponential)
+            # Weight: more recent days have higher weight (exponential)
             weight = 2.0 ** (idx - len(unique_days) + 1)
             weighted_sum += day_mean * weight
             weight_total += weight
@@ -205,67 +207,104 @@ def _get_intraday_pattern(sensor_name: str, time_of_day_minutes: float, window_d
     return None
 
 
-def get_replay_temperature(sensor_name: str, sim_minutes: float):
+def get_replay_temperature(sensor_name: str, current_datetime: Optional[datetime] = None):
     """
-    Replay della temperatura basato su dati storici.
+    Temperature replay based on historical data, aligned to real time.
+
+    Logic:
+    - For any datetime, search for data from that SAME DATE in the CSV
+    - If that date has data -> interpolate the time within that day
+    - If that date has NO data (future) -> use intraday pattern from other days
     
-    Logica:
-    - Se sim_minutes è entro i dati disponibili -> replay diretto (interpolazione)
-    - Se sim_minutes è oltre i dati -> usa il pattern intraday per predire
+    Args:
+        sensor_name: name of the sensor
+        current_datetime: current datetime to look up (uses date + time of day)
+    
+    Returns:
+        Temperature value or None if no data is available
     """
+    # Handle None or missing datetime -> fallback to model-only
+    if current_datetime is None:
+        return None
+    
     series = _load_temp_series_for_sensor(sensor_name)
     if not series:
         return None
 
-    times, values = series
-    if not times or not values:
+    datetimes, values = series
+    if not datetimes or not values:
         return None
 
-    # Before first
-    if sim_minutes <= times[0]:
-        return float(values[0])
+    # Convert all to timezone-naive for comparison
+    current_dt = current_datetime
+    if current_dt.tzinfo is not None:
+        current_dt = current_dt.replace(tzinfo=None)
 
-    # All'interno del range disponibile: interpolazione diretta
-    if sim_minutes <= times[-1]:
-        for i in range(len(times) - 1):
-            t1, t2 = times[i], times[i + 1]
-            if t1 <= sim_minutes <= t2:
-                v1, v2 = values[i], values[i + 1]
-                if t2 == t1:
-                    return float(v1)
-                alpha = (sim_minutes - t1) / (t2 - t1)
-                return float(v1 + alpha * (v2 - v1))
-        return float(values[-1])
+    # Search for data from the SAME DATE in the CSV
+    target_date = current_dt.date()
     
-    # AFTER LAST: usa il pattern intraday per predire
-    # Calcola a che ora della giornata siamo (in minuti dalla mezzanotte)
-    total_series_minutes = times[-1]
-    time_of_day = (total_series_minutes % (24 * 60))  # modulo 1440 (minuti in un giorno)
+    # Find all data points from this date
+    same_date_indices = [i for i, dt in enumerate(datetimes) if dt.date() == target_date]
     
-    # Prova a trovare un pattern storico
-    predicted = _get_intraday_pattern(sensor_name, time_of_day)
-    if predicted is not None:
-        return float(predicted)
+    if same_date_indices:
+        # This date HAS data in the CSV -> interpolate within that day
+        first_idx = same_date_indices[0]
+        last_idx = same_date_indices[-1]
+        
+        dt_first = datetimes[first_idx]
+        dt_last = datetimes[last_idx]
+        
+        # Before first sample of this day
+        if current_dt < dt_first:
+            return float(values[first_idx])
+        
+        # After last sample of this day
+        if current_dt > dt_last:
+            # Extrapolate damped from today's data
+            v_prev = float(values[last_idx - 1]) if last_idx > first_idx else float(values[last_idx])
+            v_last = float(values[last_idx])
+            slope = v_last - v_prev
+            time_since_last = (current_dt - dt_last).total_seconds() / 60.0
+            damped_slope = slope * (0.95 ** time_since_last)
+            return max(15.0, min(40.0, v_last + damped_slope))
+        
+        # Within range: interpolate
+        for i in range(len(same_date_indices) - 1):
+            idx1 = same_date_indices[i]
+            idx2 = same_date_indices[i + 1]
+            dt1 = datetimes[idx1]
+            dt2 = datetimes[idx2]
+            
+            if dt1 <= current_dt <= dt2:
+                v1 = float(values[idx1])
+                v2 = float(values[idx2])
+                
+                if dt2 == dt1:
+                    return v1
+                
+                # Linear interpolation
+                time_diff = (dt2 - dt1).total_seconds()
+                time_into = (current_dt - dt1).total_seconds()
+                alpha = time_into / time_diff
+                return v1 + alpha * (v2 - v1)
+        
+        # Last sample of the day
+        return float(values[last_idx])
     
-    # Fallback: usa l'ultimo valore noto + damping leggero
-    last_val = float(values[-1])
-    
-    # Calcola la pendenza degli ultimi valori per damping
-    if len(values) >= 3:
-        v_prev = float(values[-2])
-        v_last = float(values[-1])
-        slope = v_last - v_prev
-        # Dampizza la pendenza per extrapolazione
-        steps_beyond = sim_minutes - times[-1]
-        damped_slope = slope * (0.95 ** steps_beyond)  # exponential decay
-        return max(15.0, min(40.0, last_val + damped_slope))
-    
-    return last_val
+    else:
+        # This date has NO data -> use intraday pattern from other days
+        time_of_day = (current_dt.hour * 60 + current_dt.minute)
+        predicted = _get_intraday_pattern(sensor_name, time_of_day)
+        if predicted is not None:
+            return float(predicted)
+        
+        # Final fallback: use last known value from CSV
+        return float(values[-1]) if values else None
 
 def get_sensor_params(sensor_type):
     params = {
         "PIR": {"min": 0.0, "max": 1.0, "step": 1.0, "state": 0.0, "direction": 0, "consumption": None},
-        "Temperature": {"min": 18.0, "max": 35.0, "step": 0.5, "state": 18.0, "direction": None, "consumption": None},
+        "Temperature": {"min": 18.0, "max": 50.0, "step": 0.5, "state": 18.0, "direction": None, "consumption": None},
         "Switch": {"min": 0, "max": 1, "step": 1, "state": 0, "direction": None, "consumption": None},
         "Smart Meter": {"min": 0.0, "max": 5000.0, "step": 10.0, "state": 0.0, "direction": None, "consumption": 0.0},
         "Weight": {"min": 0.0, "max": 1.0, "step": 1.0, "state": 0.0, "direction": None, "consumption": None},
@@ -277,7 +316,7 @@ def get_sensor_params(sensor_type):
 
 
 def _last_slope_deg_per_min(series) -> float:
-    """Ritorna la pendenza finale in °C/min (ultima differenza)."""
+    """Return the final slope in C/min (last difference)."""
     if not series:
         return 0.0
     times, vals = series
@@ -302,23 +341,23 @@ def add_sensor(canvas, event, load_active):
     dialog = SensorDialog(canvas.master, "Add sensor")
     if dialog.result:
         name, type, min_val, max_val, step, state, direction, consumption, associated_device = dialog.result
-        sensor = (
-            name,
-            x,
-            y,
-            type,
-            float(min_val),
-            float(max_val),
-            float(step),
-            float(state),
-            direction,
-            consumption,
-            associated_device,
+        sensor = Sensor(
+            name=name,
+            x=x,
+            y=y,
+            type=type,
+            min_val=float(min_val),
+            max_val=float(max_val),
+            step=float(step),
+            state=float(state),
+            direction=direction,
+            consumption=consumption,
+            associated_device=associated_device,
         )
 
         # write to the right list according to load_active
         if load_active:
-            sensors_file.append(sensor)
+            sensors_file.append(sensor.tuple())
         else:
             sensors.append(sensor)
 
@@ -326,39 +365,46 @@ def add_sensor(canvas, event, load_active):
 
 
 def changePIR(canvas, sensor, sensors, new_state=None):
-    if len(sensor) != 11:
-        print(f"Error: wrong sensor structure {sensor}")
-        return None, None, sensors
-
-    name, x, y, type, min_val, max_val, step, state, direction, consumption, associated_device = sensor
-    state = float(state)
+    # Handle both Sensor objects and tuples
+    if isinstance(sensor, Sensor):
+        name, x, y, type_s, min_val = sensor.name, sensor.x, sensor.y, sensor.type, sensor.min_val
+        state = float(sensor.state)
+        direction, consumption, associated_device = sensor.direction, sensor.consumption, sensor.associated_device
+    else:
+        if len(sensor) != 11:
+            print(f"Error: wrong sensor structure {sensor}")
+            return None, None, sensors
+        name, x, y, type_s, min_val, max_val, step, state, direction, consumption, associated_device = sensor
+        state = float(state)
 
     if new_state is None:
         new_state = 1 if state == 0 else 0
 
     updated_sensors = []
     for s in sensors:
-        if s == sensor:
-            updated_sensors.append(
-                (
-                    name,
-                    x,
-                    y,
-                    type,
-                    min_val,
-                    max_val,
-                    step,
-                    new_state,
-                    direction,
-                    consumption,
-                    associated_device,
+        if s == sensor or (isinstance(s, Sensor) and isinstance(sensor, Sensor) and s.name == sensor.name):
+            if isinstance(s, Sensor):
+                s.state = float(new_state)
+                updated_sensors.append(s)
+            else:
+                updated_sensors.append(
+                    (
+                        name, x, y, type_s, min_val, max_val if len(s) > 5 else min_val,
+                        step if len(s) > 6 else 1.0,
+                        new_state,
+                        direction, consumption, associated_device,
+                    )
                 )
-            )
-        elif s[3] == "PIR":
-            updated_sensors.append(
-                (s[0], s[1], s[2], s[3], s[4], s[5], s[6], 0, s[8], s[9], s[10])
-            )
-            update_sensor_color(canvas, s[0], 0, s[4])
+        elif (isinstance(s, Sensor) and s.type == "PIR") or (isinstance(s, tuple) and s[3] == "PIR"):
+            if isinstance(s, Sensor):
+                s.state = 0.0
+                updated_sensors.append(s)
+                update_sensor_color(canvas, s.name, 0, s.min_val)
+            else:
+                updated_sensors.append(
+                    (s[0], s[1], s[2], s[3], s[4], s[5], s[6], 0, s[8], s[9], s[10])
+                )
+                update_sensor_color(canvas, s[0], 0, s[4])
         else:
             updated_sensors.append(s)
 
@@ -375,7 +421,7 @@ def get_last_real_temperature(sensor_name: str, window_minutes: int = 10):
 
     df = None
 
-    # 1) se è associato a DHT via GPIO, prova per gpio
+    # 1) if bound to DHT via GPIO, try GPIO
     if isinstance(cfg, dict) and cfg.get("by") == "dht":
         gpio = cfg.get("gpio")
         if gpio is not None:
@@ -384,7 +430,7 @@ def get_last_real_temperature(sensor_name: str, window_minutes: int = 10):
             except Exception as e:
                 print(f"[WARN] load_temp_by_gpio_any_csv failed for {sensor_name}: {e}")
 
-    # 2) sennò cerca nel file
+    # 2) otherwise try by label
     if df is None or df.empty:
         try:
             df = load_temp_by_label_any_csv(sensor_name)
@@ -395,12 +441,12 @@ def get_last_real_temperature(sensor_name: str, window_minutes: int = 10):
     if df is None or df.empty or "value" not in df.columns:
         return None
 
-    # tieni solo i valori numerici validi
+    # keep only valid numeric values
     df_valid = df.dropna(subset=["value"])
     if df_valid.empty:
         return None
 
-    # ULTIMO valore (cioè "in quel minuto")
+    # latest value (i.e., at that minute)
     try:
         latest = float(df_valid["value"].iloc[-1])
         return latest
@@ -445,15 +491,16 @@ def infer_room_state(sensor_name: str, window_minutes: int = 20) -> str:
     else:
         return "stable"
 
-def changeTemperature(canvas, sensor, sensors, heating_factor, delta_seconds, current_datetime=None):
+def changeTemperature(canvas, sensor, sensors, heating_factor, delta_seconds, current_datetime=None, active_devices=None):
     """
-    Update a Temperature sensor state.
+    Update a Temperature sensor state with dynamic simulation.
 
     Behavior:
-      - If no real CSV exists for this sensor: simple physical-ish update.
-      - If CSV exists:
-          * within CSV horizon: replay (interpolation)
-          * beyond CSV: damped extrapolation (no ML; temp_forecast module not present)
+      - Uses a realistic thermal model:
+          * Daily cycle (cooler at night, warmer during day)
+          * Device heat contribution (computers, appliances generate heat)
+          * Thermal inertia (slow, gradual changes)
+      - If real CSV exists beyond sim_min: optionally blend/compare
     """
     if len(sensor) != 11:
         print(f"Error: unexpected Temperature structure {sensor}")
@@ -474,44 +521,88 @@ def changeTemperature(canvas, sensor, sensors, heating_factor, delta_seconds, cu
     # 1 real second = 1 simulated minute
     prev_sim_min = float(TEMP_SIM_MIN.get(name, 0.0))
     delta_sim_min = float(delta_seconds or 0.0)
+    
+    # Clamp delta to reasonable range (0.1 to 120 minutes per step)
+    delta_sim_min = max(0.1, min(120.0, delta_sim_min))
+    
     sim_min = prev_sim_min + delta_sim_min
     TEMP_SIM_MIN[name] = sim_min
 
-    # Load real series (if available)
-    series = _load_temp_series_for_sensor(name)
-    last_real_min = None
-    if series:
-        times, _values = series
-        if times:
-            last_real_min = float(times[-1])
-
-    # Keep a recent buffer (useful if you re-enable ML later)
+    # Keep a recent buffer
     recent = TEMP_RECENT.get(name)
     if recent is None:
         recent = deque(maxlen=30)  # last 30 minutes
         TEMP_RECENT[name] = recent
     recent.append(float(current_state))
 
-    new_state = float(current_state)
+    # Preload CSV target (if any) so we can decide whether to apply daily cycle.
+    # Pass the actual current_datetime for real-time alignment
+    csv_target = get_replay_temperature(name, current_datetime)
 
-    # --- If no CSV exists -> fallback "physics"
-    if last_real_min is None:
-        if heating_factor > 0:
-            new_state = current_state + step * delta_sim_min * float(heating_factor)
-        else:
-            new_state = current_state - step * delta_sim_min
-
-        new_state = max(min_val, min(max_val, new_state))
-        new_state = round(new_state * 2) / 2.0
-
+    # --- DYNAMIC THERMAL MODEL ---
+    # Base temperature follows daily cycle only if CSV data is available.
+    if csv_target is None:
+        if name not in TEMP_BASELINE:
+            TEMP_BASELINE[name] = float(current_state)
+        base_temp = TEMP_BASELINE[name]
     else:
-        # --- CSV exists -> replay / extrapolate using get_replay_temperature()
-        target = get_replay_temperature(name, sim_min)
-        if target is not None:
-            new_state = float(target)
+        # Use real time of day from current_datetime for accurate daily cycle
+        if current_datetime is not None:
+            hour_of_day = current_datetime.hour + current_datetime.minute / 60.0
+        else:
+            # Fallback to relative minutes if no current_datetime
+            time_of_day = (sim_min % (24 * 60))  # minutes since midnight
+            hour_of_day = time_of_day / 60.0
 
-        # Do NOT clamp to min/max when replaying real data
-        new_state = round(new_state, 2)
+        # Base temperature: 15°C at night (4 AM), 20°C during day (2 PM)
+        # Sinusoidal cycle with min at 4:00 and max at 14:00
+        phase = ((hour_of_day - 4.0) / 24.0) * 2 * math.pi  # 4 AM = minimum
+        base_temp = 17.5 + 2.5 * math.sin(phase)  # oscillates 15-20°C
+    
+    # Device heat contribution (check nearby active devices)
+    device_heat = 0.0
+    if active_devices:
+        for dev in active_devices:
+            if len(dev) >= 10:
+                dev_name, dev_x, dev_y, dev_type, _, dev_state = dev[:6]
+                if dev_state == 1:  # device is ON
+                    # Calculate distance to this temperature sensor
+                    dist = ((float(dev_x) - float(x))**2 + (float(dev_y) - float(y))**2)**0.5
+                    # Heat contribution decays with distance (max 2°C at distance 0, negligible beyond 300 pixels)
+                    if dist < 300:
+                        contribution = 15.0 * (1.0 - dist / 300.0)
+                        device_heat += contribution
+    
+    # Target temperature = base + device heat
+    target_temp = base_temp + device_heat
+
+    # If a CSV series exists, nudge the target toward historical/replay values.
+    # With high weight (0.9), the simulation follows the CSV closely while maintaining some model stability.
+    if csv_target is not None:
+        try:
+            csv_target = float(csv_target)
+            csv_weight = 0.9  # High weight: mostly follow CSV (0.9) with ~10% model correction
+            target_temp = (csv_target * csv_weight) + (target_temp * (1.0 - csv_weight))
+        except Exception:
+            pass
+    
+    # Apply thermal inertia (slow convergence to target)
+    # Larger time constant = slower changes (realistic for building thermal mass)
+    time_constant = 30.0  # minutes to reach ~63% of target
+    alpha = 1.0 - math.exp(-delta_sim_min / time_constant)
+    new_state = current_state + alpha * (target_temp - current_state)
+    
+    # Clamp to reasonable bounds (expand to CSV target if needed)
+    effective_min = 0.0
+    effective_max = max_val
+    if csv_target is not None:
+        try:
+            effective_min = min(effective_min, float(csv_target))
+            effective_max = max(effective_max, float(csv_target))
+        except Exception:
+            pass
+    new_state = max(effective_min, min(effective_max, new_state))
+    new_state = round(new_state, 2)
 
 
     # Update buffer with the new value
@@ -526,35 +617,40 @@ def changeTemperature(canvas, sensor, sensors, heating_factor, delta_seconds, cu
         else:
             updated.append(s)
 
-    changing = abs(new_state - current_state) > 1e-6
-    update_temperature_sensor_color(canvas, name, changing=changing)
+    temp_change_abs = abs(new_state - current_state)
+    if temp_change_abs > 0.0:
+        TEMP_GREEN_UNTIL[name] = sim_min + 5.0
+    green_until = TEMP_GREEN_UNTIL.get(name, 0.0)
+    changing = sim_min <= green_until
+    if canvas is not None:
+        update_temperature_sensor_color(canvas, name, changing=changing)
     return name, new_state, updated
 
 
 def _get_intraday_power_pattern(associated_device: str, time_of_day_minutes: float, window_days: int = 7) -> Optional[float]:
     """
-    Usa i dati storici dello smart meter per trovare il pattern di consumo nella giornata.
-    
-    Cerca in tutti i giorni precedenti qual è il consumo tipico a questa ora del giorno,
-    e ritorna la media ponderata (più recente = più peso).
-    
+    Use smart meter history to find the intraday consumption pattern.
+
+    Looks across previous days for typical consumption at this time of day,
+    and returns a weighted average (more recent = higher weight).
+
     Args:
-        associated_device: nome del dispositivo associato (pc, wm, dw, etc.)
-        time_of_day_minutes: minuti dalla mezzanotte (0-1440)
-        window_days: quanti giorni precedenti analizzare
-    
+        associated_device: associated device name (pc, wm, dw, etc.)
+        time_of_day_minutes: minutes since midnight (0-1440)
+        window_days: how many previous days to analyze
+
     Returns:
-        potenza predetta in Watt o None se non ci sono dati
+        predicted power in W or None if no data is available
     """
     try:
         import smartmeter
     except ImportError:
         return None
     
-    # Deriva il device_id dal nome
+    # Derive device_id from name
     device_id = smartmeter.derive_device_id(associated_device)
     
-    # Carica i dati storici
+    # Load historical data
     df = None
     try:
         df = smartmeter.load_power_by_device_id_any_csv(device_id, logs_dir="logs")
@@ -568,7 +664,7 @@ def _get_intraday_power_pattern(associated_device: str, time_of_day_minutes: flo
     if df.empty:
         return None
     
-    # Aggiungi colonna con ora del giorno (minuti dalla mezzanotte) e giorno
+    # Add hour-of-day (minutes since midnight) and day columns
     if not isinstance(df.index, pd.DatetimeIndex):
         return None
     
@@ -576,7 +672,7 @@ def _get_intraday_power_pattern(associated_device: str, time_of_day_minutes: flo
     df_copy["hour_of_day"] = (df_copy.index.hour * 60 + df_copy.index.minute).astype(float)
     df_copy["day"] = df_copy.index.date
     
-    # Trova valori simili (entro ±30 minuti dall'ora desiderata)
+    # Find similar values (within ±30 minutes)
     tolerance_min = 30
     candidates = df_copy[
         (df_copy["hour_of_day"] >= time_of_day_minutes - tolerance_min) &
@@ -586,7 +682,7 @@ def _get_intraday_power_pattern(associated_device: str, time_of_day_minutes: flo
     if candidates.empty:
         return None
     
-    # Calcola la media ponderata (giorni più recenti hanno peso maggiore)
+    # Weighted average (more recent days have higher weight)
     unique_days = candidates["day"].unique()
     if len(unique_days) > window_days:
         unique_days = unique_days[-window_days:]
@@ -598,7 +694,7 @@ def _get_intraday_power_pattern(associated_device: str, time_of_day_minutes: flo
         day_data = candidates[candidates["day"] == day]["value"]
         if not day_data.empty:
             day_mean = float(day_data.mean())
-            # Peso: giorni più recenti hanno peso maggiore (exponential)
+            # Weight: more recent days have higher weight (exponential)
             weight = 2.0 ** (idx - len(unique_days) + 1)
             weighted_sum += day_mean * weight
             weight_total += weight
@@ -609,14 +705,27 @@ def _get_intraday_power_pattern(associated_device: str, time_of_day_minutes: flo
     return None
 
 
-def get_replay_smart_meter_consumption(associated_device: str, sim_minutes: float) -> Optional[float]:
+def get_replay_smart_meter_consumption(associated_device: str, current_datetime: Optional[datetime] = None) -> Optional[float]:
     """
-    Replay del consumo dello smart meter basato su dati storici.
+    Smart meter consumption replay based on historical data, aligned to real time.
+
+    Logic:
+    - If current_datetime matches a time in the CSV -> direct lookup (with interpolation)
+    - If current_datetime is outside the CSV range:
+      - Before: use first value
+      - After: use intraday pattern prediction
     
-    Logica:
-    - Se sim_minutes è entro i dati disponibili -> replay diretto (interpolazione)
-    - Se sim_minutes è oltre i dati -> usa il pattern intraday per predire
+    Args:
+        associated_device: device name (PC, WASHER, etc.)
+        current_datetime: current datetime to look up
+    
+    Returns:
+        Power consumption in W or None if no data is available
     """
+    # Handle None or missing datetime -> fallback to model-only
+    if current_datetime is None:
+        return None
+    
     try:
         import smartmeter
     except ImportError:
@@ -636,38 +745,46 @@ def get_replay_smart_meter_consumption(associated_device: str, sim_minutes: floa
     if df_sorted.empty:
         return None
     
-    # Converti in minuti relativi dal primo valore
-    t0 = df_sorted.index[0]
-    rel_minutes = (df_sorted.index - t0).total_seconds() / 60.0
-    times = rel_minutes.to_list()
+    # Get datetimes from index
+    datetimes = df_sorted.index.to_list()
     values = df_sorted["value"].astype(float).to_list()
     
-    # Before first
-    if sim_minutes <= times[0]:
+    # Convert to timezone-naive for comparison
+    current_dt = current_datetime
+    if current_dt.tzinfo is not None:
+        current_dt = current_dt.replace(tzinfo=None)
+    
+    # Before first: use first value
+    if current_dt <= datetimes[0]:
         return float(values[0])
     
-    # All'interno del range disponibile: interpolazione diretta
-    if sim_minutes <= times[-1]:
-        for i in range(len(times) - 1):
-            t1, t2 = times[i], times[i + 1]
-            if t1 <= sim_minutes <= t2:
-                v1, v2 = values[i], values[i + 1]
-                if t2 == t1:
-                    return float(v1)
-                alpha = (sim_minutes - t1) / (t2 - t1)
-                return float(v1 + alpha * (v2 - v1))
+    # After last: use intraday pattern prediction
+    if current_dt >= datetimes[-1]:
+        time_of_day = (current_dt.hour * 60 + current_dt.minute)
+        predicted = _get_intraday_power_pattern(associated_device, time_of_day)
+        if predicted is not None:
+            return float(predicted)
+        
+        # Fallback: use last known value
         return float(values[-1])
     
-    # AFTER LAST: usa il pattern intraday per predire
-    total_series_minutes = times[-1]
-    time_of_day = (total_series_minutes % (24 * 60))
+    # Within available range: interpolate
+    for i in range(len(datetimes) - 1):
+        dt1, dt2 = datetimes[i], datetimes[i + 1]
+        if dt1 <= current_dt <= dt2:
+            v1, v2 = values[i], values[i + 1]
+            
+            # Handle zero duration (same timestamp)
+            if dt2 == dt1:
+                return float(v1)
+            
+            # Linear interpolation
+            time_diff = (dt2 - dt1).total_seconds()
+            time_into_interval = (current_dt - dt1).total_seconds()
+            alpha = time_into_interval / time_diff
+            return float(v1 + alpha * (v2 - v1))
     
-    # Prova a trovare un pattern storico
-    predicted = _get_intraday_power_pattern(associated_device, time_of_day)
-    if predicted is not None:
-        return float(predicted)
-    
-    # Fallback: usa l'ultimo valore noto
+    # Should not reach here if logic is sound, but return last value as fallback
     return float(values[-1])
 
 
@@ -693,19 +810,14 @@ def changeSmartMeter(canvas, sensor, sensors, devices, delta_seconds, current_da
     new_consumption = 0.0
 
     if associated_device:
-        # 1) Prova prima la predizione intelligente basata su dati storici
+        # 1) Try historical prediction first
         if current_datetime:
-            # Calcola i minuti simulati dalla mezzanotte di quella giornata
-            time_of_day = (current_datetime.hour * 60 + current_datetime.minute)
-            # Calcola quanti giorni abbiamo simulato (possiamo fare cumulative, ma per ora prendiamo solo l'ora)
-            sim_minutes = time_of_day
-            
-            # Prova la predizione storica
-            replay_consumption = get_replay_smart_meter_consumption(associated_device, sim_minutes)
+            # Try historical prediction with real datetime alignment
+            replay_consumption = get_replay_smart_meter_consumption(associated_device, current_datetime)
             if replay_consumption is not None:
                 new_consumption = max(0.0, float(replay_consumption))
             else:
-                # 2) Fallback: calcola dal dispositivo associato e cicli attivi
+                # 2) Fallback: compute from associated device and active cycles
                 associated_dev = next((d for d in devices if d[0] == associated_device), None)
                 if not associated_dev and devices:
                     associated_dev = next((d for d in devices if d[0] == associated_device), None)
@@ -721,7 +833,7 @@ def changeSmartMeter(canvas, sensor, sensors, devices, delta_seconds, current_da
                     else:
                         new_consumption = 0.0
         else:
-            # Se non abbiamo current_datetime, usa il metodo vecchio
+            # If current_datetime is missing, use the legacy method
             associated_dev = next((d for d in devices if d[0] == associated_device), None)
             if not associated_dev and devices:
                 associated_dev = next((d for d in devices if d[0] == associated_device), None)
@@ -830,7 +942,14 @@ class SensorDialog(simpledialog.Dialog):
 
         self.associated_device_label = tk.Label(master, text="Associated device:")
 
-        devices_names_runtime = [d[0] for d in devices] if devices else []
+        # Handle both Device objects and tuples
+        devices_names_runtime = []
+        for d in devices:
+            if isinstance(d, Device):
+                devices_names_runtime.append(d.name)
+            else:
+                devices_names_runtime.append(d[0])
+        
         devices_names_file = [d[0] for d in devices_file] if devices_file else []
         devices_names = sorted(set(devices_names_runtime + devices_names_file))
 
@@ -874,8 +993,19 @@ class SensorDialog(simpledialog.Dialog):
             messagebox.showwarning("Input not valid", "Sensor name cannot be empty.")
             return False
 
-        for s in sensors + list(sensors_file):
-            if name == s[0]:
+        # Check both runtime sensors and file sensors
+        for s in sensors:
+            if isinstance(s, Sensor):
+                if name == s.name:
+                    messagebox.showwarning("Input not valid", "Sensor name already exists.")
+                    return False
+            else:
+                if name == s[0]:
+                    messagebox.showwarning("Input not valid", "Sensor name already exists.")
+                    return False
+        
+        for s in sensors_file:
+            if isinstance(s, tuple) and name == s[0]:
                 messagebox.showwarning("Input not valid", "Sensor name already exists.")
                 return False
 
@@ -906,13 +1036,13 @@ class SensorDialog(simpledialog.Dialog):
             associated_device = self.associated_device_combobox.get()
 
         if type == "Temperature":
-            # se esiste la serie dal CSV, usa il primo valore reale come stato iniziale
+            # If a CSV series exists, use its first value as the initial state.
             series = _load_temp_series_for_sensor(name)
             if series:
                 _, vals = series
                 if vals:
                     real_temp = float(vals[0])
-                    params["state"] = max(params["min"], min(params["max"], real_temp))
+                    params["state"] = min(params["max"], real_temp)
 
         self.result = (
             name,

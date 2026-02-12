@@ -1,6 +1,7 @@
 import tkinter as tk
 from point import points
 from read import read_walls_coordinates, coordinates, read_walls
+from models import Point
 
 walls = []
 walls_coordinates = []
@@ -26,10 +27,16 @@ def draw_line_window(canvas, window, load_active):
         coord_point1 = None
         coord_point2 = None
         for point in point_source:
-            if point[0] == point1:
-                coord_point1 = (point[1], point[2])
-            elif point[0] == point2:
-                coord_point2 = (point[1], point[2])
+            # Handle both Point objects and tuples
+            if isinstance(point, Point):
+                point_name, point_x, point_y = point.name, point.x, point.y
+            else:
+                point_name, point_x, point_y = point[0], point[1], point[2]
+            
+            if point_name == point1:
+                coord_point1 = (point_x, point_y)
+            elif point_name == point2:
+                coord_point2 = (point_x, point_y)
 
         # If both points exist, draw the line
         if coord_point1 and coord_point2:

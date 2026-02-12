@@ -11,6 +11,17 @@ from app.logging_setup import setup_logging
 logger = setup_logging("controllers.simulation")
 
 
+def _cleanup_manual_sim(ctx: AppContext):
+    """Cleanup function called after stopping manual simulation."""
+    setattr(ctx, 'timer_app_instance', None)
+    if hasattr(ctx, 'activity_label') and ctx.activity_label is not None:
+        try:
+            ctx.activity_label.destroy()
+        except:
+            pass
+        ctx.activity_label = None
+
+
 def start_sim(ctx: AppContext):
     """Start manual simulation and wire callbacks."""
     from tkinter import messagebox
@@ -21,6 +32,21 @@ def start_sim(ctx: AppContext):
     if not s_sensors:
         messagebox.showwarning("Error", "No sensors found to start the simulation.")
         return
+    
+    # Prevent multiple instances
+    if hasattr(ctx, 'timer_app_instance') and ctx.timer_app_instance is not None:
+        messagebox.showwarning("Warning", "Manual simulation is already running.")
+        return
+    
+    # Clean up previous widgets if they exist
+    if hasattr(ctx, 'activity_label') and ctx.activity_label is not None:
+        ctx.activity_label.destroy()
+        ctx.activity_label = None
+    
+    # Clean up all children of timer_frame from previous sessions
+    if hasattr(ctx, 'timer_frame'):
+        for widget in ctx.timer_frame.winfo_children():
+            widget.destroy()
 
     ctx.simulation_menu.entryconfig("Manual", state="disabled")
 
@@ -41,14 +67,16 @@ def start_sim(ctx: AppContext):
             stop_interaction_log_session(),
             ctx.canvas.unbind("<Button-1>"),
             enable_all_menus(ctx),
-            ctx.simulation_menu.entryconfig("Manual", state="normal"),
+            ctx.window.after(100, lambda: _cleanup_manual_sim(ctx)),
         ),
     )
+    
+    ctx.timer_app_instance = timer_app_instance
 
     ctx.activity_label = tk.Label(
-        ctx.timer_frame, text="Activity: None", font=("Helvetica", 16), bg="white", fg="black"
+        ctx.activity_frame, text="Activity: None", font=("Helvetica", 16), bg="white", fg="black"
     )
-    ctx.activity_label.pack(pady=10)
+    ctx.activity_label.pack(pady=15, padx=10, fill=tk.BOTH, expand=True)
     
     timer_app_instance.on_advance_step = lambda ds: update_sensors(
         ctx.canvas,
@@ -57,6 +85,7 @@ def start_sim(ctx: AppContext):
         ctx.activity_label,
         schedule_next=False,
         force=True,
+        delta_override=ds,
     )
 
     update_sensors(ctx.canvas, timer_app_instance, ctx.load_active, ctx.activity_label)

@@ -83,11 +83,21 @@ class AWSS3Importer:
             raise Exception(f"Failed to list S3 buckets: {str(e)}")
     
     def list_objects(self, bucket_name: str, prefix: str = '') -> List[str]:
-        """List objects in a specific bucket with optional prefix."""
+        """List **all** objects in a specific bucket with optional prefix (handles pagination)."""
         try:
-            response = self.s3_client.list_objects_v2(Bucket=bucket_name, Prefix=prefix)
-            objects = [obj['Key'] for obj in response.get('Contents', [])]
-            logger.info(f"Found {len(objects)} objects in bucket '{bucket_name}'")
+            paginator = self.s3_client.get_paginator('list_objects_v2')
+            page_iterator = paginator.paginate(Bucket=bucket_name, Prefix=prefix)
+
+            objects: List[str] = []
+            for page in page_iterator:
+                contents = page.get('Contents', [])
+                if contents:
+                    objects.extend(obj['Key'] for obj in contents)
+
+            logger.info(
+                f"Found {len(objects)} objects in bucket '{bucket_name}'" +
+                (f" with prefix '{prefix}'" if prefix else "")
+            )
             return objects
         except Exception as e:
             logger.error(f"Error listing objects in bucket '{bucket_name}': {e}")
@@ -358,9 +368,34 @@ class AWSS3ImportUI:
         
         content = self.importer.download_csv_file(self.selected_bucket, self.selected_file)
         if content:
-            # Save to saved.csv or prompt for location
-            if self.importer.save_to_local_csv(content, "saved.csv"):
-                messagebox.showinfo("Success", f"Imported '{self.selected_file}' to saved.csv\n\nUse File → Load default to open it.")
+            # Ask for file type/name to determine the save path
+            file_type = messagebox.askquestion(
+                "File Type",
+                "Is this a TEMPERATURE sensor file (like t1, t2, etc.)?\n\n"
+                "Click YES to save as dht_<name>.csv\n"
+                "Click NO to save as saved.csv (for scenarios)"
+            )
+            
+            if file_type == 'yes':
+                # Ask for the sensor name
+                from tkinter import simpledialog
+                sensor_name = simpledialog.askstring(
+                    "Sensor Name",
+                    "Enter sensor name (e.g., t1, t2, bedroom_temp):"
+                )
+                
+                if sensor_name:
+                    sensor_name = sensor_name.strip()
+                    local_path = f"logs/dht_{sensor_name}.csv"
+                else:
+                    messagebox.showwarning("Cancelled", "Import cancelled.")
+                    self.status_label.config(text="Import cancelled", fg="orange")
+                    return
+            else:
+                local_path = "saved.csv"
+            
+            if self.importer.save_to_local_csv(content, local_path):
+                messagebox.showinfo("Success", f"Imported '{self.selected_file}' to {local_path}\n\nUse File → Load default to open it.")
                 self.status_label.config(text="Import successful ✓", fg="green")
                 self.window.destroy()
             else:

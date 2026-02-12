@@ -1,6 +1,7 @@
 import tkinter as tk
 from point import points
 from read import coordinates, read_doors
+from models import Point, Door
 
 doors = []
 
@@ -19,10 +20,16 @@ def draw_line_door(canvas, window, load_active):
         coord_point1 = None
         coord_point2 = None
         for p_point in point:
-            if p_point[0] == point1:
-                coord_point1 = (p_point[1], p_point[2])
-            elif p_point[0] == point2:
-                coord_point2 = (p_point[1], p_point[2])
+            # Handle both Point objects and tuples
+            if isinstance(p_point, Point):
+                p_name, p_x, p_y = p_point.name, p_point.x, p_point.y
+            else:
+                p_name, p_x, p_y = p_point[0], p_point[1], p_point[2]
+            
+            if p_name == point1:
+                coord_point1 = (p_x, p_y)
+            elif p_name == point2:
+                coord_point2 = (p_x, p_y)
 
         if coord_point1 and coord_point2:
             state = "close"

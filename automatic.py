@@ -6,6 +6,7 @@ import pandas as pd
 from app.context import AppContext
 
 from graph import show_graphs_auto
+from models import Sensor, Device
 
 class ScrollableArea:
     def __init__(self, parent):

@@ -1,4 +1,7 @@
 from utils import update_sensor_color
+import logging
+
+logger = logging.getLogger("common")
 
 sensor_states = {}
 active_cycles = {}
@@ -8,7 +11,7 @@ def update_sensor_states(name, state, sensor_states, timestamp):
         sensor_states[name] = {'time': [], 'state': []}
     sensor_states[name]['time'].append(timestamp)
     sensor_states[name]['state'].append(state)
-    print(f"Sensor state updated: {name} -> {state}")
+    logger.debug(f"Sensor state updated: {name} -> {state}")
 
 # this function is not in the sensor.py file to avoid cyclic import
 def changeSwitch(canvas, sensor, sensors, door_state):

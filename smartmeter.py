@@ -9,11 +9,11 @@ import pandas as pd
 logger = logging.getLogger("smartmeter")
 logger.setLevel(logging.INFO)
 
-DEFAULT_INTERVAL = 60  # secondi
+DEFAULT_INTERVAL = 60  # seconds
 LOGGERS: Dict[str, "SmartMeterLogger"] = {}  # device_name -> logger
-CSV_WRITE_LOCKS: Dict[str, threading.Lock] = {}  # filepath -> lock (un lock per file)
+CSV_WRITE_LOCKS: Dict[str, threading.Lock] = {}  # filepath -> lock (one lock per file)
 
-# Regole per derivare un ID canonico (case-insensitive) dal nome del device
+# Rules to derive a canonical ID (case-insensitive) from the device name
 DEFAULT_ID_RULES: List[Tuple[str, str]] = [
     ("pc", "PC"),
     ("laptop", "PC"),
@@ -143,9 +143,9 @@ class SmartMeterLogger:
                 if v is None and p is not None and a is not None and a > 1e-3:
                     v = p / a
 
-                ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]  # con millisecondi
-                
-                # Lock per file specifico (non globale)
+                ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]  # with milliseconds
+
+                # Per-file lock (not global)
                 if self.csv_path not in CSV_WRITE_LOCKS:
                     CSV_WRITE_LOCKS[self.csv_path] = threading.Lock()
                 
@@ -228,13 +228,19 @@ def load_csv(csv_path: str, device: Optional[str] = None) -> dict:
 
 def load_power_df(csv_path: str, device: Optional[str] = None, rule: str = "1min", agg: str = "median") -> pd.DataFrame:
     raw = load_csv(csv_path, device=device)
-    rows = [{"timestamp": ts, "value": d.get("power")} for ts, d in raw.items() if d.get("power") is not None]
+    rows = []
+    for ts, d in raw.items():
+        p = d.get("power")
+        if p is not None and p > 0:
+            rows.append({"timestamp": ts, "value": p})
     if not rows:
         return pd.DataFrame()
     df = pd.DataFrame(rows)
     df["timestamp"] = pd.to_datetime(df["timestamp"], format="%Y-%m-%d %H:%M:%S.%f", errors="coerce")
     df = df.dropna(subset=["timestamp"]).sort_values("timestamp").set_index("timestamp")
-    return df.resample(rule).mean() if agg == "mean" else df.resample(rule).median()
+    # Use max to keep highest power value per minute
+    result = df.resample(rule).max()
+    return result.fillna(0)
 
 def load_power_by_device_id_any_csv(device_id_wanted: str, logs_dir="logs") -> pd.DataFrame:
     want = _canon_id(device_id_wanted)
@@ -247,16 +253,16 @@ def load_power_by_device_id_any_csv(device_id_wanted: str, logs_dir="logs") -> p
                     continue
                 ts = row.get("timestamp_iso"); p = row.get("power_W")
                 try:
-                    p = float(p)
+                    p = float(p) if p and p.strip() else 0.0
                 except Exception:
-                    continue
+                    p = 0.0
                 rows.append({"timestamp": ts, "value": p})
     if not rows:
         return pd.DataFrame()
     df = pd.DataFrame(rows)
     df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
     df = df.dropna(subset=["timestamp"]).sort_values("timestamp").set_index("timestamp")
-    return df.resample("1min").median()
+    return df.resample("1min").max().fillna(0)
 
 def load_power_by_ip_any_csv(ip_wanted: str, logs_dir="logs") -> pd.DataFrame:
     rows = []
@@ -270,9 +276,9 @@ def load_power_by_ip_any_csv(ip_wanted: str, logs_dir="logs") -> pd.DataFrame:
                     ts = row.get("timestamp_iso")
                     p = row.get("power_W")
                     try:
-                        p = float(p)
+                        p = float(p) if p and p.strip() else 0.0
                     except Exception:
-                        continue
+                        p = 0.0
                     rows.append({"timestamp": ts, "value": p})
         except Exception:
             continue
@@ -281,4 +287,4 @@ def load_power_by_ip_any_csv(ip_wanted: str, logs_dir="logs") -> pd.DataFrame:
     df = pd.DataFrame(rows)
     df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
     df = df.dropna(subset=["timestamp"]).sort_values("timestamp").set_index("timestamp")
-    return df.resample("1min").median()
+    return df.resample("1min").max().fillna(0)

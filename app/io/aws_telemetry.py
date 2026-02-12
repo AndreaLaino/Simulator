@@ -452,7 +452,18 @@ class AWSTelemetryImportUI:
         )
         if not output_name:
             return
+        
+        original_name = output_name
         output_name = _sanitize_name(output_name)
+        
+        # Add prefix if not already present
+        if data_type == "dht" and not output_name.startswith("dht_"):
+            output_name = f"dht_{output_name}"
+        elif data_type == "smartmeter" and not output_name.startswith("smartmeter_"):
+            output_name = f"smartmeter_{output_name}"
+        
+        print(f"DEBUG: original='{original_name}', sanitized='{_sanitize_name(original_name)}', data_type='{data_type}', final='{output_name}'")
+        
         logs_dir = "logs"
         os.makedirs(logs_dir, exist_ok=True)
         
@@ -517,6 +528,13 @@ class AWSTelemetryImportUI:
         if not output_name:
             return
         output_name = _sanitize_name(output_name)
+        
+        # Add prefix if not already present
+        if process_as == "dht" and not output_name.startswith("dht_"):
+            output_name = f"dht_{output_name}"
+        elif process_as == "smartmeter" and not output_name.startswith("smartmeter_"):
+            output_name = f"smartmeter_{output_name}"
+        
         logs_dir = "logs"
         os.makedirs(logs_dir, exist_ok=True)
 

@@ -2,6 +2,7 @@ import tkinter as tk
 from tkinter import simpledialog, messagebox
 from tkinter import ttk
 from read import read_devices as device_file
+from models import Device
 
 devices = []
 
@@ -37,8 +38,12 @@ class DeviceDialog(simpledialog.Dialog):
             messagebox.showwarning("Input not valid", "Device name cannot be empty.")
             return False
         # avoid duplicates by considering both runtimes and file uploads
-        for d in devices + device_file:
-            if name == d[0]:
+        for d in devices:
+            if isinstance(d, Device) and name == d.name:
+                messagebox.showwarning("Input not valid", "Device name already present.")
+                return False
+        for d in device_file:
+            if isinstance(d, tuple) and name == d[0]:
                 messagebox.showwarning("Input not valid", "Device name already present.")
                 return False
         return True
@@ -60,10 +65,21 @@ def add_device(canvas, event, load_active):
     dialog = DeviceDialog(canvas.master, "Add device")
     if dialog.result:
         name, type, power, min_consumption, max_consumption = dialog.result
-        device = (name, x, y, type, power, 0, min_consumption, max_consumption, 0, 1)
+        device = Device(
+            name=name, 
+            x=x, 
+            y=y, 
+            type=type, 
+            power=power, 
+            state=0,  # OFF
+            min_consumption=min_consumption, 
+            max_consumption=max_consumption, 
+            current_consumption=0.0,
+            consumption_direction=1
+        )
 
         if load_active:
-            device_file.append(device)
+            device_file.append(device.tuple())
         else:
             devices.append(device)
 
@@ -72,7 +88,10 @@ def add_device(canvas, event, load_active):
 
 
 def draw_device(canvas, device):
-    name, x, y, type, power, state, *_ = device
+    if isinstance(device, Device):
+        name, x, y, type, state = device.name, device.x, device.y, device.type, device.state
+    else:
+        name, x, y, type, power, state, *_ = device
     color = "red" if state == 0 else "green"
     canvas.create_oval(x - 5, y - 5, x + 5, y + 5, fill=color, tags=(name, 'device'))
     canvas.create_text(x+7, y, text=f"{name} ({type})", fill=color, anchor=tk.SW, tags=(name, 'device'))

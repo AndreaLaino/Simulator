@@ -54,16 +54,19 @@ def show_activity_log():
 
     tk.Label(log_window, text="Log of activities detected during the simulation").pack(pady=10)
 
-    text_box = tk.Text(log_window, height=15, width=70)
+    text_box = tk.Text(log_window, height=20, width=80)
     text_box.pack(pady=10)
 
     if not activity_log:
         text_box.insert(tk.END, "No activity recorded.\n")
     else:
-        # print activity list
-        text_box.insert(tk.END, "Activity\tStart\tEnd\n")
-        for entry in activity_log:
-            text_box.insert(tk.END, f"{entry['activity']}\t{entry['start']}\t{entry['end']}\n")
+        # print activity list in vertical column format
+        for i, entry in enumerate(activity_log, 1):
+            text_box.insert(tk.END, f"Activity {i}:\n")
+            text_box.insert(tk.END, f"  Name:  {entry['activity']}\n")
+            text_box.insert(tk.END, f"  Start: {entry['start']}\n")
+            text_box.insert(tk.END, f"  End:   {entry['end']}\n")
+            text_box.insert(tk.END, "-" * 60 + "\n")
 
     def save():
         save_activity_log()

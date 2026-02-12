@@ -101,14 +101,24 @@ def build_home_ui(ctx: AppContext):
 
     _load_image(canvas, "images/grid_25.PNG")
 
-    # Right: timer panel
-    timer_container = tk.Frame(home_frame, bg="lightgrey", width=400)
-    timer_container.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+    # Right: timer and activity panel (vertical layout)
+    right_container = tk.Frame(home_frame, bg="lightgrey", width=400)
+    right_container.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+
+    # Timer at the top - takes most space
+    timer_container = tk.Frame(right_container, bg="lightgrey", width=400, height=700)
+    timer_container.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=10, pady=10)
     timer_canvas = tk.Canvas(timer_container, bg="lightgrey")
     timer_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
     timer_frame = tk.Frame(timer_canvas, bg="lightgrey", width=400)
     timer_canvas.create_window((0, 0), window=timer_frame, anchor="nw")
     ctx.timer_frame = timer_frame
+
+    # Activity at the bottom - fixed smaller space
+    activity_container = tk.Frame(right_container, bg="lightgrey", width=400, height=150)
+    activity_container.pack(side=tk.BOTTOM, fill=tk.X, expand=False, padx=10, pady=10)
+    activity_container.pack_propagate(False)
+    ctx.activity_frame = activity_container
 
     menu_bar = Menu(ctx.window)
     ctx.window.config(menu=menu_bar)

@@ -5,6 +5,7 @@ import json
 from typing import Optional
 
 from consumption_profiles import consumption_profiles, get_device_consumption
+from models import Sensor, Device, Point, Door, Wall
 
 # Cache to avoid re-reading CSVs repeatedly when drawing sensors.
 _REAL_TEMP_CACHE: dict[str, bool] = {}
@@ -63,20 +64,23 @@ def _is_real_temperature_sensor(sensor_name: str, logs_dir: str = "logs") -> boo
 def _temperature_color(sensor_name: str, changing: bool = False) -> str:
     """Color rules for Temperature sensors.
 
-    - If linked to a real DHT sensor -> cyan (azzurro)
-    - Else -> green only while changing, red otherwise
+    - Red by default
+    - Green only while changing
     """
-    if _is_real_temperature_sensor(sensor_name):
-        return "cyan"
     return "green" if changing else "red"
 
 
 def draw_sensor(canvas, sensor):
-    name, x, y, type, min_val, max_val, step, state, direction, consumption, associated_device = sensor
+    # Handle both Sensor objects and tuples
+    if isinstance(sensor, Sensor):
+        name, x, y, type_s, min_val, state = sensor.name, sensor.x, sensor.y, sensor.type, sensor.min_val, sensor.state
+    else:
+        name, x, y, type_s, min_val, max_val, step, state, direction, consumption, associated_device = sensor
+    
     # Default coloring:
-    #   - Temperature sensors: special rules (cyan if linked to real DHT logs; else green only when changing)
+    #   - Temperature sensors: red by default; green only when changing
     #   - Other sensors: keep legacy behavior (green if above min)
-    if type == "Temperature":
+    if type_s == "Temperature":
         # At draw time we don't know if it's "changing" yet -> show red (or cyan if real)
         color = _temperature_color(name, changing=False)
     else:
@@ -101,19 +105,34 @@ def draw_fov(canvas, x, y, max_distance, fov_angle, direction):
                           fill="", outline="blue", width=2, tags='fov')
 
 def get_nearby_device_states(sensor, devices, walls, doors, max_distance=100):
-    x1, y1 = sensor[1], sensor[2]
+    # Handle both Sensor objects and tuples
+    if isinstance(sensor, Sensor):
+        x1, y1 = sensor.x, sensor.y
+    else:
+        x1, y1 = sensor[1], sensor[2]
+    
     nearby_device_states = []
     for device in devices:
-        # device structure: (name, x, y, type, power, state)
-        name, dx, dy, type, power, state = device
+        # Handle both Device objects and tuples
+        if isinstance(device, Device):
+            dx, dy, state = device.x, device.y, device.state
+        else:
+            # device structure: (name, x, y, type, power, state, ...)
+            dx, dy, state = device[1], device[2], device[5]
+        
         if calculate_distance(x1, y1, dx, dy) <= max_distance:
             if not is_path_blocked_by_walls(x1, y1, dx, dy, walls, doors):
                 nearby_device_states.append(state)
     return nearby_device_states
 
 def is_within_fov(sensor, x, y, max_distance, fov_angle):
-    # Assume sensor[8] holds the direction.
-    sx, sy, direction = sensor[1], sensor[2], sensor[8]
+    # Handle both Sensor objects and tuples
+    if isinstance(sensor, Sensor):
+        sx, sy, direction = sensor.x, sensor.y, sensor.direction
+    else:
+        # Assume sensor[8] holds the direction
+        sx, sy, direction = sensor[1], sensor[2], sensor[8]
+    
     dx, dy = x - sx, y - sy
     distance = math.hypot(dx, dy)
     if distance > max_distance:
@@ -129,9 +148,20 @@ def is_within_fov(sensor, x, y, max_distance, fov_angle):
 
 def find_closest_sensor_without_intersection(point, sensors, walls_coordinates):
     x1, y1 = point
-    sensors_sorted = sorted(sensors, key=lambda s: calculate_distance(x1, y1, s[1], s[2]))
+    
+    def sensor_distance(s):
+        if isinstance(s, Sensor):
+            return calculate_distance(x1, y1, s.x, s.y)
+        else:
+            return calculate_distance(x1, y1, s[1], s[2])
+    
+    sensors_sorted = sorted(sensors, key=sensor_distance)
     for sensor in sensors_sorted:
-        x2, y2 = sensor[1], sensor[2]
+        if isinstance(sensor, Sensor):
+            x2, y2 = sensor.x, sensor.y
+        else:
+            x2, y2 = sensor[1], sensor[2]
+        
         intersects = False
         for i in range(0, len(walls_coordinates), 4):
             p1, p2, p3, p4 = walls_coordinates[i:i + 4]
@@ -145,9 +175,20 @@ def find_closest_sensor_without_intersection(point, sensors, walls_coordinates):
 def find_closest_sensor_within_fov(point, sensors, walls_coordinates, doors, max_distance, fov_angle):
     x, y = point
     visible_sensors = [s for s in sensors if is_within_fov(s, x, y, max_distance, fov_angle)]
-    visible_sensors.sort(key=lambda s: calculate_distance(x, y, s[1], s[2]))
+    
+    def sensor_distance(s):
+        if isinstance(s, Sensor):
+            return calculate_distance(x, y, s.x, s.y)
+        else:
+            return calculate_distance(x, y, s[1], s[2])
+    
+    visible_sensors.sort(key=sensor_distance)
     for sensor in visible_sensors:
-        sx, sy = sensor[1], sensor[2]
+        if isinstance(sensor, Sensor):
+            sx, sy = sensor.x, sensor.y
+        else:
+            sx, sy = sensor[1], sensor[2]
+        
         if not is_path_blocked_by_walls(sx, sy, x, y, walls_coordinates, doors):
             return sensor
     return None
@@ -158,11 +199,18 @@ def is_path_blocked_by_walls(x1, y1, x2, y2, walls_coordinates, doors):
         if intersect(x1, y1, x2, y2, p1, p2, p3, p4):
             return True
     for door in doors:
-        # door structure: (x1, y1, x2, y2, state).
-        if door[4] == "close":
-            px1, py1, px2, py2 = door[0], door[1], door[2], door[3]
-            if intersect(x1, y1, x2, y2, px1, py1, px2, py2):
-                return True
+        # Handle both Door objects and tuples
+        if isinstance(door, Door):
+            if door.is_closed():
+                px1, py1, px2, py2 = door.x1, door.y1, door.x2, door.y2
+                if intersect(x1, y1, x2, y2, px1, py1, px2, py2):
+                    return True
+        else:
+            # door structure: (x1, y1, x2, y2, state)
+            if door[4] == "close":
+                px1, py1, px2, py2 = door[0], door[1], door[2], door[3]
+                if intersect(x1, y1, x2, y2, px1, py1, px2, py2):
+                    return True
     return False
 
 def on_segment(x1, y1, x2, y2, x, y):
@@ -194,15 +242,27 @@ def intersect(x1, y1, x2, y2, x3, y3, x4, y4):
 def find_switch_sensors_by_doors(doors, sensors):
     results = []
     for door in doors:
-        x1, y1, x2, y2, state_p = door
+        # Handle both Door objects and tuples
+        if isinstance(door, Door):
+            x1, y1, x2, y2, state_p = door.x1, door.y1, door.x2, door.y2, door.state
+        else:
+            x1, y1, x2, y2, state_p = door
+        
         center_x = (x1 + x2) / 2
         center_y = (y1 + y2) / 2
         associated_sensors = []
         for sensor in sensors:
-            if sensor[3] == "Switch":
+            # Handle both Sensor objects and tuples
+            if isinstance(sensor, Sensor):
+                is_switch = sensor.type == "Switch"
+                x, y = sensor.x, sensor.y
+            else:
+                is_switch = sensor[3] == "Switch"
                 x, y = sensor[1], sensor[2]
-                if calculate_distance(center_x, center_y, x, y) < 50:
-                    associated_sensors.append(sensor)
+            
+            if is_switch and calculate_distance(center_x, center_y, x, y) < 50:
+                associated_sensors.append(sensor)
+        
         if associated_sensors:
             results.append((door, associated_sensors, state_p))
     return results
@@ -219,8 +279,8 @@ def update_sensor_color(canvas, name, state, min_val):
 def update_temperature_sensor_color(canvas, name: str, *, changing: bool) -> None:
     """Explicit Temperature sensor color update.
 
-    - Real DHT-backed sensors -> cyan
-    - Simulated temperature sensors -> green only while changing
+    - Red by default
+    - Green only while changing
     """
     color = _temperature_color(name, changing=changing)
     rect_tag = f'{name}_rect_sensor'
@@ -251,9 +311,9 @@ def update_devices_consumption(canvas, devices, delta_seconds, timer_app_instanc
                 profile_duration = max(consumption_profiles[cycle_type]["profile"].keys())
 
                 # At end of profile: for non-continuous devices, turn OFF and close cycle.
-                # Continuous: Refrigerator and Computer continue in duration module.
+                # Continuous: Refrigerator, Computer and Oven continue in duration module.
                 if elapsed_min > profile_duration:
-                    if cycle_type not in ["Fridge", "Computer"]:
+                    if cycle_type not in ["Fridge", "Computer", "Oven"]:
                         # Turn off the device and close the cycle
                         devices[i] = (name, dx, dy, type, power, 0, min_c, max_c, 0, 0)
                         try:
@@ -264,7 +324,7 @@ def update_devices_consumption(canvas, devices, delta_seconds, timer_app_instanc
                             canvas.itemconfig(name, fill="red")
                         continue
                     else:
-                        elapsed_min = elapsed_min % profile_duration  # ciclo continuo
+                        elapsed_min = elapsed_min % profile_duration  # continuous cycle
 
                 # Calculate consumption
                 current_consumption = get_device_consumption(

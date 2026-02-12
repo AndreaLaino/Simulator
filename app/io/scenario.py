@@ -15,6 +15,7 @@ from read import (
 )
 from app.context import AppContext
 from app.logging_setup import setup_logging
+from models import Point, Sensor, Device, Door
 
 
 def _ask_overwrite_or_append(parent, dest_path: str) -> str:
@@ -44,6 +45,37 @@ def _ask_overwrite_or_append(parent, dest_path: str) -> str:
 
 
 logger = setup_logging("io.scenario")
+
+
+def _point_to_tuple(p: Point | tuple) -> tuple:
+    if isinstance(p, Point):
+        return (p.name, p.x, p.y)
+    return p
+
+
+def _sensor_to_tuple(s: Sensor | tuple) -> tuple:
+    if isinstance(s, Sensor):
+        return (
+            s.name, s.x, s.y, s.type, s.min_val, s.max_val, s.step, s.state,
+            s.direction, s.consumption, s.associated_device
+        )
+    return s
+
+
+def _device_to_tuple(d: Device | tuple) -> tuple:
+    if isinstance(d, Device):
+        return (
+            d.name, d.x, d.y, d.type, d.power, d.state,
+            d.min_consumption, d.max_consumption, d.current_consumption,
+            d.consumption_direction
+        )
+    return d
+
+
+def _door_to_tuple(d: Door | tuple) -> tuple:
+    if isinstance(d, Door):
+        return (d.x1, d.y1, d.x2, d.y2, d.state)
+    return d
 
 
 def merge_smartmeter_files(logs_dir: str = "logs") -> bool:
@@ -164,7 +196,7 @@ def _save_records_to_csv(records: list, filepath: str, data_type: str, device_na
                 reader = csv.reader(f)
                 next(reader, None)  # Skip header
                 for row in reader:
-                    if row and row[0] and row[0].strip():  # Valida timestamp non vuoto
+                    if row and row[0] and row[0].strip():  # Validate non-empty timestamp
                         existing_data[row[0]] = row
         except Exception as e:
             logger.warning("Failed to read existing file for dedup: %s", e)
@@ -176,7 +208,7 @@ def _save_records_to_csv(records: list, filepath: str, data_type: str, device_na
             if 'raw_csv' in r:
                 continue
             ts = r.get('timestamp', '').strip()
-            if ts:  # Valida timestamp non vuoto
+            if ts:  # Validate non-empty timestamp
                 new_data[ts] = [
                     ts,
                     device_name,
@@ -191,7 +223,7 @@ def _save_records_to_csv(records: list, filepath: str, data_type: str, device_na
             if 'raw_csv' in r:
                 continue
             ts = r.get('timestamp', '').strip()
-            if ts:  # Valida timestamp non vuoto
+            if ts:  # Validate non-empty timestamp
                 new_data[ts] = [
                     ts,
                     r.get('label', ''),
@@ -261,7 +293,8 @@ def _write_scenario(ctx: AppContext, filename: str) -> None:
         # Points
         csvwriter.writerow(["Positions"])
         data = points if not ctx.load_active else ctx.r_points
-        for name, x, y in data:
+        for p in data:
+            name, x, y = _point_to_tuple(p)
             csvwriter.writerow([name, x, y])
 
         # Walls
@@ -279,8 +312,9 @@ def _write_scenario(ctx: AppContext, filename: str) -> None:
         csvwriter.writerow([])
         csvwriter.writerow(["Sensors"])
         src = sensors if not ctx.load_active else ctx.read_sensors
-        for (name, x, y, typ, min_val, max_val, step, state,
-             direction, consumption, associated_device) in src:
+        for s in src:
+            (name, x, y, typ, min_val, max_val, step, state,
+             direction, consumption, associated_device) = _sensor_to_tuple(s)
             min_val = float(min_val)
             max_val = float(max_val)
             step = float(step)
@@ -297,7 +331,8 @@ def _write_scenario(ctx: AppContext, filename: str) -> None:
         csvwriter.writerow([])
         csvwriter.writerow(["Devices"])
         srcd = devices if not ctx.load_active else ctx.read_devices
-        for (name, x, y, typ, power, state, min_c, max_c, curr_c, c_dir) in srcd:
+        for d in srcd:
+            (name, x, y, typ, power, state, min_c, max_c, curr_c, c_dir) = _device_to_tuple(d)
             csvwriter.writerow([
                 name, int(x), int(y), typ, float(power), int(state),
                 float(min_c), float(max_c), float(curr_c),
@@ -308,7 +343,8 @@ def _write_scenario(ctx: AppContext, filename: str) -> None:
         csvwriter.writerow([])
         csvwriter.writerow(["Doors"])
         srcdoors = doors if not ctx.load_active else ctx.read_doors
-        for x1, y1, x2, y2, state in srcdoors:
+        for d in srcdoors:
+            x1, y1, x2, y2, state = _door_to_tuple(d)
             csvwriter.writerow([x1, y1, x2, y2, state])
 
     logger.info("Scenario saved successfully to %s.", filename)
@@ -361,7 +397,7 @@ def _sanitize(name: str) -> str:
     return "".join(ch if ch.isalnum() or ch in "-._" else "-" for ch in (name or "").strip())
 
 def _unique_path(path: str) -> str:
-    """Se esiste già, aggiunge _2, _3... prima dell'estensione."""
+    """If it already exists, add _2, _3, ... before the extension."""
     if not os.path.exists(path):
         return path
     root, ext = os.path.splitext(path)
@@ -401,7 +437,7 @@ def _ask_choice(parent, title: str, label: str, choices: list[str], default: str
     btns = tk.Frame(win)
     btns.grid(row=2, column=0, padx=10, pady=(5, 10), sticky="e")
     tk.Button(btns, text="OK", command=ok).pack(side="left", padx=5)
-    tk.Button(btns, text="Annulla", command=cancel).pack(side="left")
+    tk.Button(btns, text="Cancel", command=cancel).pack(side="left")
 
     win.wait_window()
     return out["value"]
@@ -559,8 +595,8 @@ def import_csv_from_s3(parent=None) -> None:
     # Sensor type selection
     sim_type = _ask_choice(
         parent,
-        title="Tipo sensore",
-        label="Seleziona il tipo di sensore:",
+        title="Sensor type",
+        label="Select the sensor type:",
         choices=["PIR", "Temperature", "Switch", "Smart Meter", "Weight"],
         default="Temperature",
     )
@@ -578,13 +614,22 @@ def import_csv_from_s3(parent=None) -> None:
 
     # Base name (same as local import)
     base_name = simpledialog.askstring(
-        "Nome",
-        "Inserisci il nome (es: t1, t2, sm_pc, ...)",
+        "Name",
+        "Enter the name (e.g., t1, t2, sm_pc, ...)",
         parent=parent
     )
     if not base_name:
         return
     base_name = _sanitize(base_name)
+    
+    # Save original name (for device_name in CSV)
+    original_name = base_name
+    
+    # Add prefix if not already present
+    if sim_type == "Temperature" and not base_name.startswith("dht_"):
+        base_name = f"dht_{base_name}"
+    elif sim_type == "Smart Meter" and not base_name.startswith("smartmeter_"):
+        base_name = f"smartmeter_{base_name}"
 
     # Import files
     logs_dir = "logs"
@@ -680,7 +725,7 @@ def import_csv_from_s3(parent=None) -> None:
     append_mode = (action == 'append')
     
     try:
-        _save_records_to_csv(all_records, dest_path, prefix, device_name=base_name, ip=device_ip, append_mode=append_mode)
+        _save_records_to_csv(all_records, dest_path, prefix, device_name=original_name, ip=device_ip, append_mode=append_mode)
         logger.info("Imported %d records from S3 to: %s (mode: %s)", len(all_records), dest_path, action)
         messagebox.showinfo(
             "Import Complete", 
@@ -705,8 +750,8 @@ def import_csv(parent=None) -> None:
     # 1) enum of sensor types
     sim_type = _ask_choice(
         parent,
-        title="Tipo sensore",
-        label="Seleziona il tipo di sensore:",
+        title="Sensor type",
+        label="Select the sensor type:",
         choices=["PIR", "Temperature", "Switch", "Smart Meter", "Weight"],
         default="PIR",
     )
@@ -725,13 +770,22 @@ def import_csv(parent=None) -> None:
 
     # 3) name
     base_name = simpledialog.askstring(
-        "Nome",
-        "Inserisci il nome (es: t1, t2, sm_pc, ...)",
+        "Name",
+        "Enter the name (e.g., t1, t2, sm_pc, ...)",
         parent=parent
     )
     if not base_name:
         return
     base_name = _sanitize(base_name)
+    
+    # Save original name (for device_name in CSV)
+    original_name = base_name
+    
+    # Add prefix if not already present
+    if sim_type == "Temperature" and not base_name.startswith("dht_"):
+        base_name = f"dht_{base_name}"
+    elif sim_type == "Smart Meter" and not base_name.startswith("smartmeter_"):
+        base_name = f"smartmeter_{base_name}"
 
     logs_dir = "logs"
     os.makedirs(logs_dir, exist_ok=True)
@@ -754,7 +808,7 @@ def import_csv(parent=None) -> None:
                 reader = csv.reader(f)
                 header = next(reader, None)
                 for row in reader:
-                    if row and row[0] and row[0].strip():  # Valida timestamp
+                    if row and row[0] and row[0].strip():  # Validate timestamp
                         existing_data[row[0]] = row
         except Exception as e:
             logger.warning("Failed to read existing file for dedup: %s", e)
@@ -768,7 +822,7 @@ def import_csv(parent=None) -> None:
                 reader = csv.reader(src_file)
                 header = next(reader, None)  # Skip header
                 for row in reader:
-                    if row and row[0] and row[0].strip():  # Valida timestamp
+                    if row and row[0] and row[0].strip():  # Validate timestamp
                         all_new_data[row[0]] = row  # Keep latest within import
             
             logger.info("Imported %s -> %s (mode: %s)", src, dest_path, action if imported == 0 else 'append')
@@ -798,7 +852,7 @@ def import_csv(parent=None) -> None:
         messagebox.showerror("Import Failed", f"Error writing data: {e}")
         return
 
-    messagebox.showinfo("Import", f"Importati {imported} file in {logs_dir}/\nMode: {action.capitalize()}\nDedup: timestamp duplicates kept as latest")
+    messagebox.showinfo("Import", f"Imported {imported} file(s) into {logs_dir}/\nMode: {action.capitalize()}\nDedup: timestamp duplicates kept as latest")
 def export_simulation_csv() -> None:
     """Export the latest 'interactions.csv' from logs to a chosen location."""
     logs_root = "logs"

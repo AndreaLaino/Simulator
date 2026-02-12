@@ -1,6 +1,7 @@
 import tkinter as tk
 from tkinter import simpledialog, messagebox
 from read import coordinates
+from models import Point
 
 points = []
 add_point_enabled = True
@@ -28,10 +29,12 @@ def add_point(canvas, event, load_active):
         messagebox.showwarning("Input not valid", "Point name already exists.")
         return
 
+    point = Point(name=point_name, x=x, y=y)
+
     if load_active:
-        coordinates.append((point_name, x, y))
+        coordinates.append(point.tuple())
     else:
-        points.append((point_name, x, y))
+        points.append(point)
     # Update canvas with the point
     canvas.create_oval(x - 5, y - 5, x + 5, y + 5, fill="blue", tags='point')
     canvas.create_text(x+7, y, text=point_name, fill="blue", anchor=tk.SW, tags='point')
@@ -41,7 +44,13 @@ def point_name_exists(name: str) -> bool:
     if not target:
         return False
     # Names in runtime list
-    runtime_names = {p[0].strip().lower() for p in points}
+    runtime_names = set()
+    for p in points:
+        if isinstance(p, Point):
+            runtime_names.add(p.name.strip().lower())
+        else:
+            runtime_names.add(p[0].strip().lower())
+    
     # Names in loaded-from-file list
     file_names = {p[0].strip().lower() for p in coordinates}
     return target in runtime_names or target in file_names
