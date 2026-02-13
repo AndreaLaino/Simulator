@@ -340,7 +340,9 @@ def stop_interaction_log_session():
 def append_interaction_row(row):
     global _interaction_file
     if _interaction_file is None:
-        start_interaction_log_session()
+        # Avoid auto-creating a second session; require explicit start.
+        print("[LOG] Interaction Session not started; row skipped.")
+        return
     try:
         import csv as _csv
         writer = _csv.writer(_interaction_file)

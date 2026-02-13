@@ -561,6 +561,24 @@ def changeTemperature(canvas, sensor, sensors, heating_factor, delta_seconds, cu
     
     # Device heat contribution (check nearby active devices)
     device_heat = 0.0
+    heat_by_type = {
+        "Oven": 3.5,
+        "Computer": 0.6,
+        "Washing_Machine": 1.2,
+        "Coffee_Machine": 1.0,
+        "Dishwasher": 1.2,
+        "Fridge": 0.3,
+    }
+    radius_by_type = {
+        "Oven": 220.0,
+        "Computer": 140.0,
+        "Washing_Machine": 160.0,
+        "Coffee_Machine": 120.0,
+        "Dishwasher": 160.0,
+        "Fridge": 120.0,
+    }
+    default_heat = 0.8
+    default_radius = 140.0
     if active_devices:
         for dev in active_devices:
             if len(dev) >= 10:
@@ -568,9 +586,11 @@ def changeTemperature(canvas, sensor, sensors, heating_factor, delta_seconds, cu
                 if dev_state == 1:  # device is ON
                     # Calculate distance to this temperature sensor
                     dist = ((float(dev_x) - float(x))**2 + (float(dev_y) - float(y))**2)**0.5
-                    # Heat contribution decays with distance (max 2°C at distance 0, negligible beyond 300 pixels)
-                    if dist < 300:
-                        contribution = 15.0 * (1.0 - dist / 300.0)
+                    # Heat contribution decays with distance by device type.
+                    max_heat = heat_by_type.get(dev_type, default_heat)
+                    radius = radius_by_type.get(dev_type, default_radius)
+                    if dist < radius:
+                        contribution = max_heat * (1.0 - dist / radius)
                         device_heat += contribution
     
     # Target temperature = base + device heat

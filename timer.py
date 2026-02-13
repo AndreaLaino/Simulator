@@ -19,6 +19,8 @@ class TimerApp:
         self.advanced = False
         self.current_date = datetime.today().strftime("%Y-%m-%d")
         self.advance_remaining = 0  # Track remaining seconds to advance
+        self.advance_speed = 1
+        self.last_update = None
 
         self.timer_frame.columnconfigure(0, weight=1)
 
@@ -49,6 +51,20 @@ class TimerApp:
         self.start_stop_button = tk.Button(self.timer_frame, text="Start", font=("Helvetica", 15, "bold"), command=self.start_stop)
         self.start_stop_button.grid(row=3, column=0, pady=(15, 10), padx=20, sticky="ew", ipady=15)
 
+        # Speed controls
+        speed_frame = tk.Frame(self.timer_frame, bg="lightgrey")
+        speed_frame.grid(row=4, column=0, pady=(5, 10), padx=20, sticky="ew")
+        speed_frame.columnconfigure((0, 1, 2, 3), weight=1)
+
+        tk.Label(speed_frame, text="Speed", font=("Helvetica", 12), bg="lightgrey").grid(row=0, column=0, padx=4)
+        self.speed_1x_button = tk.Button(speed_frame, text="1x", font=("Helvetica", 12), command=lambda: self.set_speed(1))
+        self.speed_2x_button = tk.Button(speed_frame, text="2x", font=("Helvetica", 12), command=lambda: self.set_speed(2))
+        self.speed_5x_button = tk.Button(speed_frame, text="5x", font=("Helvetica", 12), command=lambda: self.set_speed(5))
+        self.speed_1x_button.grid(row=0, column=1, padx=4, sticky="ew")
+        self.speed_2x_button.grid(row=0, column=2, padx=4, sticky="ew")
+        self.speed_5x_button.grid(row=0, column=3, padx=4, sticky="ew")
+        self._update_speed_buttons()
+
         # Advance 15 min Button
         self.advance_button = tk.Button(self.timer_frame, text="Advance 15 min", font=("Helvetica", 15), command=self.advance_time)
         self.advance_button.grid(row=5, column=0, pady=(15, 10), padx=20, sticky="ew", ipady=15)
@@ -76,20 +92,21 @@ class TimerApp:
                     self.elapsed_time = timedelta()
                     self.is_running = True
                     self.start_stop_button.config(text="Stop")
+                    self.last_update = datetime.now()
                     if self.start_callback:
                         self.start_callback()
                 except ValueError:
                     print("Invalid time format. Use HH:MM.")
             else:
-                self.start_time = datetime.now() - self.elapsed_time
                 self.is_running = True
                 self.start_stop_button.config(text="Stop")
+                self.last_update = datetime.now()
                 if self.start_callback:
                     self.start_callback()
         else:
-            self.elapsed_time = datetime.now() - self.start_time
             self.is_running = False
             self.start_stop_button.config(text="Start")
+            self.last_update = None
             if self.stop_callback:
                 self.stop_callback()
 
@@ -105,36 +122,41 @@ class TimerApp:
         self.advance_remaining = jump_seconds
         self._do_advance_batch()
 
+    def set_speed(self, speed):
+        self.advance_speed = int(speed)
+        self._update_speed_buttons()
+
+    def _update_speed_buttons(self):
+        active_bg = "#cfe8cf"
+        inactive_bg = "SystemButtonFace"
+        self.speed_1x_button.config(bg=active_bg if self.advance_speed == 1 else inactive_bg)
+        self.speed_2x_button.config(bg=active_bg if self.advance_speed == 2 else inactive_bg)
+        self.speed_5x_button.config(bg=active_bg if self.advance_speed == 5 else inactive_bg)
+
     def _do_advance_batch(self):
-        """Process 10 seconds of advance per batch with 10ms delay for fast processing."""
+        """Process advance steps with short yields to keep UI responsive."""
         if self.advance_remaining <= 0:
             self.advanced = True
             self.timer_frame.after(200, self.reset_flag)
             return
-        
-        # Process up to 10 seconds per batch
-        batch_size = min(10, self.advance_remaining)
-        
-        for _ in range(batch_size):
-            # Advance by 1 second
+
+        step = min(self.advance_speed, self.advance_remaining)
+        for _ in range(step):
+            self.elapsed_time += timedelta(seconds=1)
             if self.is_running:
-                self.start_time -= timedelta(seconds=1)
-                self.elapsed_time = datetime.now() - self.start_time
-            else:
-                self.elapsed_time += timedelta(seconds=1)
-            
-            # Call the sensor update callback for this 1-second step
+                self.last_update = datetime.now()
+
             if callable(self.on_advance_step):
                 self.on_advance_step(1)
-        
-        self.advance_remaining -= batch_size
+
+        self.advance_remaining -= step
         
         # Update display
         simulated_time = self.get_simulated_time()
         self.label.config(text=f"Time: {simulated_time} \n Date: {self.current_date}")
         
-        # Schedule next batch with 10ms delay for faster processing
-        self.timer_frame.after(10, self._do_advance_batch)
+        # Schedule next step with a short delay to keep UI responsive
+        self.timer_frame.after(1, self._do_advance_batch)
 
     def reset_flag(self):
         self.advanced = False
@@ -159,6 +181,7 @@ class TimerApp:
         self.elapsed_time = timedelta()
         self.simulated_start_time = None
         self.current_date = datetime.today().strftime("%Y-%m-%d")
+        self.last_update = None
 
         self.start_hour_entry.delete(0, tk.END)
         self.start_hour_entry.insert(0, "00:00")
@@ -168,7 +191,13 @@ class TimerApp:
 
     def update_timer(self):
         if self.is_running:
-            self.elapsed_time = datetime.now() - self.start_time
+            now = datetime.now()
+            if self.last_update is None:
+                self.last_update = now
+            else:
+                delta = now - self.last_update
+                self.elapsed_time += delta * self.advance_speed
+                self.last_update = now
             simulated_time = self.get_simulated_time()
             self.label.config(text=f"Time: {simulated_time} \n Date: {self.current_date}")
 
