@@ -49,6 +49,8 @@ def start_sim(ctx: AppContext):
             widget.destroy()
 
     ctx.simulation_menu.entryconfig("Manual", state="disabled")
+    if hasattr(ctx, 'canvas') and ctx.canvas is not None:
+        ctx.canvas.unbind("<Button-1>")
 
     timer_app_instance = TimerApp(
         ctx.timer_frame,
@@ -56,10 +58,6 @@ def start_sim(ctx: AppContext):
             start_simulation(ctx.canvas, timer_app_instance, ctx.load_active, ctx.activity_label),
             monitor_activities(ctx.canvas, ctx.load_active, ctx.activity_label, timer_app_instance),
             start_interaction_log_session(timer_app_instance.get_simulated_time()),
-            ctx.canvas.bind(
-                "<Button-1>",
-                lambda event: interaction(ctx.canvas, timer_app_instance, event, ctx.load_active, ctx.activity_label),
-            ),
         ),
         stop_callback=lambda: (
             stop_simulation(timer_app_instance),
@@ -69,6 +67,11 @@ def start_sim(ctx: AppContext):
             enable_all_menus(ctx),
             ctx.window.after(100, lambda: _cleanup_manual_sim(ctx)),
         ),
+    )
+
+    ctx.canvas.bind(
+        "<Button-1>",
+        lambda event: interaction(ctx.canvas, timer_app_instance, event, ctx.load_active, ctx.activity_label),
     )
     
     ctx.timer_app_instance = timer_app_instance
@@ -86,6 +89,7 @@ def start_sim(ctx: AppContext):
         schedule_next=False,
         force=True,
         delta_override=ds,
+        fast=True,
     )
 
     update_sensors(ctx.canvas, timer_app_instance, ctx.load_active, ctx.activity_label)

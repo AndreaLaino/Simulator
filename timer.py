@@ -113,14 +113,12 @@ class TimerApp:
     def advance_time(self):
         """Advance the simulated time by 15 simulated minutes with smooth batch processing."""
         jump_seconds = 15  # 1 sec = 1 simulated minute
-        self.advance_remaining = jump_seconds
-        self._do_advance_batch()
+        self._do_advance_instant(jump_seconds)
 
     def advance_hour(self):
         """Advance the simulated time by 60 simulated minutes with smooth batch processing."""
         jump_seconds = 60  # 1 sec = 1 simulated minute
-        self.advance_remaining = jump_seconds
-        self._do_advance_batch()
+        self._do_advance_instant(jump_seconds)
 
     def set_speed(self, speed):
         self.advance_speed = int(speed)
@@ -141,13 +139,12 @@ class TimerApp:
             return
 
         step = min(self.advance_speed, self.advance_remaining)
-        for _ in range(step):
-            self.elapsed_time += timedelta(seconds=1)
-            if self.is_running:
-                self.last_update = datetime.now()
+        self.elapsed_time += timedelta(seconds=step)
+        if self.is_running:
+            self.last_update = datetime.now()
 
-            if callable(self.on_advance_step):
-                self.on_advance_step(1)
+        if callable(self.on_advance_step):
+            self.on_advance_step(step)
 
         self.advance_remaining -= step
         
@@ -156,7 +153,32 @@ class TimerApp:
         self.label.config(text=f"Time: {simulated_time} \n Date: {self.current_date}")
         
         # Schedule next step with a short delay to keep UI responsive
-        self.timer_frame.after(1, self._do_advance_batch)
+        self.timer_frame.after(10, self._do_advance_batch)
+
+    def _do_advance_instant(self, jump_seconds):
+        """Advance in a single step (skip) to avoid UI lag."""
+        if jump_seconds <= 0:
+            return
+
+        self.advanced = True
+        self.advance_remaining = 0
+
+        remaining = int(jump_seconds)
+        step_size = 1
+        while remaining > 0:
+            step = step_size if remaining >= step_size else remaining
+            self.elapsed_time += timedelta(seconds=step)
+            if self.is_running:
+                self.last_update = datetime.now()
+
+            if callable(self.on_advance_step):
+                self.on_advance_step(step)
+
+            remaining -= step
+
+        simulated_time = self.get_simulated_time()
+        self.label.config(text=f"Time: {simulated_time} \n Date: {self.current_date}")
+        self.timer_frame.after(200, self.reset_flag)
 
     def reset_flag(self):
         self.advanced = False

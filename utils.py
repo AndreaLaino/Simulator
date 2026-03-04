@@ -268,6 +268,8 @@ def find_switch_sensors_by_doors(doors, sensors):
     return results
 
 def update_sensor_color(canvas, name, state, min_val):
+    if canvas is None:
+        return
     # Legacy rule for most sensors.
     color = "green" if float(state) > float(min_val) else "red"
     rect_tag = f'{name}_rect_sensor'
@@ -282,6 +284,8 @@ def update_temperature_sensor_color(canvas, name: str, *, changing: bool) -> Non
     - Red by default
     - Green only while changing
     """
+    if canvas is None:
+        return
     color = _temperature_color(name, changing=changing)
     rect_tag = f'{name}_rect_sensor'
     text_tag = f'{name}_text_sensor'

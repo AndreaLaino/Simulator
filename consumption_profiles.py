@@ -1,11 +1,8 @@
 #consumption_profiles.py
 from __future__ import annotations
 
-from typing import Dict, Optional
+from typing import Dict
 import pandas as pd
-
-import smartmeter                      
-from computer_profiles import COMPUTER_PROFILES 
 
 consumption_profiles = {
     "Fridge": {
@@ -51,23 +48,16 @@ consumption_profiles = {
     },
 
     "Computer": {
-        "standby": 8.0,  # Updated from 103.5W to match real smartmeter data (real mean: 8.0W)
+        "standby": 40.0,
         "profile": {
-            0: 8.0,
-            13: 8.0,
-            26: 8.0,
-            65: 8.0,
-            78: 8.0,
-            101: 8.0,
-            114: 8.0,
-            127: 8.0,
-            150: 8.0,
-            173: 8.0,
-            196: 8.0,
-            205: 8.0,
-            218: 8.0,
-            231: 8.0,
-            245: 8.0  # return to standby
+            0: 65.0,
+            15: 95.0,
+            30: 140.0,
+            45: 120.0,
+            60: 160.0,
+            75: 130.0,
+            90: 110.0,
+            105: 45.0,
         }
     },
 
@@ -92,12 +82,6 @@ consumption_profiles = {
             2: 200.0
         }
     }
-}
-
-_SELECTED_PC_PROFILE_BY_DEVICE: Dict[str, Optional[str]] = {}
-DEVICE_ID_BY_SIM_NAME: Dict[str, str] = {
-    "pc": "sm_pc",
-    "sm_pc": "sm_pc",   
 }
 
 
@@ -139,10 +123,6 @@ def consumption_step(profile: dict, minutes: float, standby: float, repeat: bool
         last_key = k
     return profile[keys[-1]] if repeat else profile[keys[-1]]
 
-from datetime import datetime  # if not already imported
-
-
-
 def add_noise(value: float, rel_std: float = 0.02, abs_std: float = 3.0) -> float:
     """Small gaussian noise to avoid perfectly flat synthetic signals."""
     import random
@@ -164,15 +144,10 @@ def get_device_consumption(device_name, device_type, current_timestamp, active_c
     if device_state == 0:
         return 0.0
 
-    #choose base profile dict depending on device_type 
-    if device_type == "Computer":
-        pc_profile_name = _choose_pc_profile_for_device(device_name)
-        if pc_profile_name and pc_profile_name in COMPUTER_PROFILES:
-            base = COMPUTER_PROFILES[pc_profile_name]
-        else:
-            base = consumption_profiles.get("Computer")
-    else:
-        base = consumption_profiles.get(device_type)
+    # choose base profile dict depending on device_type
+    # NOTE: use only predefined datasets here.
+    # Real CSV replay for Smart Meter is handled in sensor.changeSmartMeter.
+    base = consumption_profiles.get(device_type)
 
     if not base:
         return 0.0
@@ -211,45 +186,3 @@ def get_device_consumption(device_name, device_type, current_timestamp, active_c
 
     # Not in cycle: device is ON but idle -> standby
     return standby
-
-
-
-def _csv_id_for_device(device_name: str) -> str:
-    """Map the device name to the CSV ID used in smartmeter logs."""
-    return DEVICE_ID_BY_SIM_NAME.get(device_name, device_name)
-
-
-
-def _real_mean_power_for_device(device_name: str, logs_dir: str = "logs") -> Optional[float]:
-    """Return the real mean power consumption for a device from smartmeter logs."""
-    csv_id = _csv_id_for_device(device_name)
-    df = smartmeter.load_power_by_device_id_any_csv(csv_id, logs_dir=logs_dir)
-    if df.empty:
-        return None
-    return float(df["value"].mean())
-
-
-
-def _choose_pc_profile_for_device(device_name: str) -> Optional[str]:
-    """Choose the best matching PC profile for the given device based on real mean power."""
-    if device_name in _SELECTED_PC_PROFILE_BY_DEVICE:
-        return _SELECTED_PC_PROFILE_BY_DEVICE[device_name]
-
-    mean_power = _real_mean_power_for_device(device_name)
-
-    if mean_power is None:
-        _SELECTED_PC_PROFILE_BY_DEVICE[device_name] = None
-        return None
-
-    best_name = None
-    best_delta = None
-
-    for name, prof in COMPUTER_PROFILES.items():
-        target = float(prof.get("target_mean", prof.get("standby", 0.0)))
-        delta = abs(target - mean_power)
-        if best_delta is None or delta < best_delta:
-            best_delta = delta
-            best_name = name
-
-    _SELECTED_PC_PROFILE_BY_DEVICE[device_name] = best_name
-    return best_name

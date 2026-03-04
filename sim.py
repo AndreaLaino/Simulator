@@ -293,13 +293,15 @@ def toggle_device_state(canvas, event, sensor_states, load_active, timer_app_ins
                     update_sensor_states(sensor_name, sensor_state, sensor_states, current_timestamp)
             break
 
-def update_sensors(canvas, timer_app_instance, load_active, activity_label, *, schedule_next=True, force=False, delta_override=None):
+def update_sensors(canvas, timer_app_instance, load_active, activity_label, *, schedule_next=True, force=False, delta_override=None, fast=False):
     """update sensors based on elapsed time and log events"""
     global sensors, read_sensors, last_temp_elapsed
 
     if (not timer_app_instance.is_running) and (not force):
         print("Error: Simulation not started.")
         return
+
+    ui_canvas = None if fast else canvas
 
     if load_active:
         s_sensors = read_sensors
@@ -379,7 +381,7 @@ def update_sensors(canvas, timer_app_instance, load_active, activity_label, *, s
 
             heating_factor = 1 if oven_active else 0
             sensor_name, new_state, s_sensors = changeTemperature(
-                canvas, sensor, s_sensors, heating_factor, delta_seconds, current_datetime, d_devices
+                ui_canvas, sensor, s_sensors, heating_factor, delta_seconds, current_datetime, d_devices
             )
             update_sensor_states(sensor_name, new_state, sensor_states, timestamp)
 
@@ -390,7 +392,7 @@ def update_sensors(canvas, timer_app_instance, load_active, activity_label, *, s
         sensor_type = sensor.type if isinstance(sensor, Sensor) else sensor[3]
         if sensor_type == "Smart Meter":
             sensor_name, new_consumption, s_sensors = changeSmartMeter(
-                canvas, sensor, s_sensors, d_devices, delta_seconds, current_datetime
+                ui_canvas, sensor, s_sensors, d_devices, delta_seconds, current_datetime
             )
 
             sensor_type_name = "Smart Meter"
@@ -441,7 +443,7 @@ def update_sensors(canvas, timer_app_instance, load_active, activity_label, *, s
         sensors = s_sensors
 
     # update devices consumption
-    update_devices_consumption(canvas, d_devices, delta_seconds, timer_app_instance)
+    update_devices_consumption(ui_canvas, d_devices, delta_seconds, timer_app_instance)
 
     # snapshot device->smartmeter 
     for device in d_devices:
@@ -496,7 +498,7 @@ def update_sensors(canvas, timer_app_instance, load_active, activity_label, *, s
     do_sample = PER_SECOND_SENSOR_SAMPLING
     types_to_sample = PER_SECOND_SENSOR_TYPES
 
-    if do_sample:
+    if do_sample and not fast:
         for sensor in s_sensors:
             sensor_type = sensor.type if isinstance(sensor, Sensor) else sensor[3]
             if sensor_type in types_to_sample:
@@ -517,7 +519,7 @@ def update_sensors(canvas, timer_app_instance, load_active, activity_label, *, s
                 log_sensor_event(timestamp, sensor_name, sensor_type, sx, sy, int(current_state), "per-second-sample")
 
     # normal scheduling
-    if schedule_next and timer_app_instance.is_running:
+    if schedule_next and timer_app_instance.is_running and canvas is not None:
         canvas.after(1000, lambda: update_sensors(canvas, timer_app_instance, load_active, activity_label))
 
         

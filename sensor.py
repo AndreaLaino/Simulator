@@ -647,7 +647,7 @@ def changeTemperature(canvas, sensor, sensors, heating_factor, delta_seconds, cu
     return name, new_state, updated
 
 
-def _get_intraday_power_pattern(associated_device: str, time_of_day_minutes: float, window_days: int = 7) -> Optional[float]:
+def _get_intraday_power_pattern(device_id: str, time_of_day_minutes: float, window_days: int = 7) -> Optional[float]:
     """
     Use smart meter history to find the intraday consumption pattern.
 
@@ -655,7 +655,7 @@ def _get_intraday_power_pattern(associated_device: str, time_of_day_minutes: flo
     and returns a weighted average (more recent = higher weight).
 
     Args:
-        associated_device: associated device name (pc, wm, dw, etc.)
+        device_id: smart meter device_id stored in CSV
         time_of_day_minutes: minutes since midnight (0-1440)
         window_days: how many previous days to analyze
 
@@ -666,9 +666,6 @@ def _get_intraday_power_pattern(associated_device: str, time_of_day_minutes: flo
         import smartmeter
     except ImportError:
         return None
-    
-    # Derive device_id from name
-    device_id = smartmeter.derive_device_id(associated_device)
     
     # Load historical data
     df = None
@@ -725,7 +722,7 @@ def _get_intraday_power_pattern(associated_device: str, time_of_day_minutes: flo
     return None
 
 
-def get_replay_smart_meter_consumption(associated_device: str, current_datetime: Optional[datetime] = None) -> Optional[float]:
+def get_replay_smart_meter_consumption(device_id: str, current_datetime: Optional[datetime] = None) -> Optional[float]:
     """
     Smart meter consumption replay based on historical data, aligned to real time.
 
@@ -736,7 +733,7 @@ def get_replay_smart_meter_consumption(associated_device: str, current_datetime:
       - After: use intraday pattern prediction
     
     Args:
-        associated_device: device name (PC, WASHER, etc.)
+        device_id: smart meter device_id stored in CSV
         current_datetime: current datetime to look up
     
     Returns:
@@ -750,8 +747,6 @@ def get_replay_smart_meter_consumption(associated_device: str, current_datetime:
         import smartmeter
     except ImportError:
         return None
-    
-    device_id = smartmeter.derive_device_id(associated_device)
     
     try:
         df = smartmeter.load_power_by_device_id_any_csv(device_id, logs_dir="logs")
@@ -781,7 +776,7 @@ def get_replay_smart_meter_consumption(associated_device: str, current_datetime:
     # After last: use intraday pattern prediction
     if current_dt >= datetimes[-1]:
         time_of_day = (current_dt.hour * 60 + current_dt.minute)
-        predicted = _get_intraday_power_pattern(associated_device, time_of_day)
+        predicted = _get_intraday_power_pattern(device_id, time_of_day)
         if predicted is not None:
             return float(predicted)
         
@@ -808,60 +803,151 @@ def get_replay_smart_meter_consumption(associated_device: str, current_datetime:
     return float(values[-1])
 
 
-def changeSmartMeter(canvas, sensor, sensors, devices, delta_seconds, current_datetime):
-    if len(sensor) < 11:
-        print(f"[WARN] Unexpected Smart Meter structure: {sensor}")
-        return sensor[0] if sensor else None, 0.0, sensors
+def _has_real_smart_meter_data(device_id: str) -> bool:
+    """Return True if historical smart meter CSV data exists for this device_id."""
+    if not device_id:
+        return False
+    try:
+        import smartmeter
+    except ImportError:
+        return False
 
-    (
-        name,
-        x,
-        y,
-        type,
-        min_val,
-        max_val,
-        step,
-        state,
-        direction,
-        _old_consumption,
-        associated_device,
-    ) = sensor
+    try:
+        df = smartmeter.load_power_by_device_id_any_csv(device_id, logs_dir="logs")
+    except Exception:
+        return False
+
+    if df is None or df.empty or "value" not in df.columns:
+        return False
+
+    return not df.dropna(subset=["value"]).empty
+
+
+def _is_smart_meter_bound_to_real_ip(sensor_name: str) -> bool:
+    """Real mode is enabled only for Smart Meter sensors explicitly bound to an IP."""
+    if not sensor_name:
+        return False
+    mapping = _load_sensor_map()
+    cfg = mapping.get(sensor_name, {}) if isinstance(mapping, dict) else {}
+    return isinstance(cfg, dict) and cfg.get("by") == "ip" and bool(str(cfg.get("value") or "").strip())
+
+
+def _find_associated_device(dev_list, wanted_name):
+    if not dev_list or not wanted_name:
+        return None
+    return next(
+        (
+            d
+            for d in dev_list
+            if (d.name if isinstance(d, Device) else d[0]) == wanted_name
+        ),
+        None,
+    )
+
+
+def _mean_power_for_smart_meter(device_id: str, min_power_w: float = 0.0) -> Optional[float]:
+    if not device_id:
+        return None
+    try:
+        import smartmeter
+    except ImportError:
+        return None
+
+    try:
+        df = smartmeter.load_power_by_device_id_any_csv(device_id, logs_dir="logs")
+    except Exception:
+        return None
+
+    if df is None or df.empty or "value" not in df.columns:
+        return None
+
+    values = df["value"].dropna()
+    values = values[values > max(0.0, float(min_power_w))]
+    if values.empty:
+        return None
+
+    try:
+        return float(values.mean())
+    except Exception:
+        return None
+
+
+def changeSmartMeter(canvas, sensor, sensors, devices, delta_seconds, current_datetime):
+    if isinstance(sensor, Sensor):
+        name = sensor.name
+        x = sensor.x
+        y = sensor.y
+        type = sensor.type
+        min_val = sensor.min_val
+        max_val = sensor.max_val
+        step = sensor.step
+        state = sensor.state
+        direction = sensor.direction
+        associated_device = sensor.associated_device
+    else:
+        if len(sensor) < 11:
+            print(f"[WARN] Unexpected Smart Meter structure: {sensor}")
+            return sensor[0] if sensor else None, 0.0, sensors
+
+        (
+            name,
+            x,
+            y,
+            type,
+            min_val,
+            max_val,
+            step,
+            state,
+            direction,
+            _old_consumption,
+            associated_device,
+        ) = sensor
 
     new_consumption = 0.0
 
     if associated_device:
-        # 1) Try historical prediction first
-        if current_datetime:
-            # Try historical prediction with real datetime alignment
-            replay_consumption = get_replay_smart_meter_consumption(associated_device, current_datetime)
+        associated_dev = _find_associated_device(devices, associated_device)
+        if not associated_dev:
+            associated_dev = _find_associated_device(devices_file, associated_device)
+
+        dev_name = None
+        dev_type = None
+        dev_state = 0
+        if associated_dev:
+            if isinstance(associated_dev, Device):
+                dev_name = associated_dev.name
+                dev_type = associated_dev.type
+                dev_state = associated_dev.state
+            else:
+                dev_name, _, _, dev_type, _, dev_state, *_ = associated_dev
+
+        has_real_data = _is_smart_meter_bound_to_real_ip(name) and _has_real_smart_meter_data(name)
+
+        # Special rule for PC smart meter:
+        # - if real data exists, use mean power (+ small noise) only when PC is ON
+        # - if OFF, force 0
+        if dev_type == "Computer" and has_real_data:
+            if dev_state == 1:
+                mean_power = _mean_power_for_smart_meter(name, min_power_w=10.0)
+                if mean_power is not None:
+                    import random
+                    std = max(1.0, abs(mean_power) * 0.03)
+                    new_consumption = max(0.0, float(random.gauss(mean_power, std)))
+                else:
+                    new_consumption = 0.0
+            else:
+                new_consumption = 0.0
+        # If this device has real CSV data, follow ONLY real data.
+        elif has_real_data:
+            replay_dt = current_datetime or datetime.now()
+            replay_consumption = get_replay_smart_meter_consumption(name, replay_dt)
             if replay_consumption is not None:
                 new_consumption = max(0.0, float(replay_consumption))
             else:
-                # 2) Fallback: compute from associated device and active cycles
-                associated_dev = next((d for d in devices if d[0] == associated_device), None)
-                if not associated_dev and devices:
-                    associated_dev = next((d for d in devices if d[0] == associated_device), None)
-                if not associated_dev and devices_file:
-                    associated_dev = next((d for d in devices_file if d[0] == associated_device), None)
-
-                if associated_dev:
-                    dev_name, _, _, dev_type, _, dev_state, *_ = associated_dev
-                    if dev_state == 1:
-                        new_consumption = get_device_consumption(
-                            dev_name, dev_type, current_datetime, active_cycles, dev_state
-                        )
-                    else:
-                        new_consumption = 0.0
+                new_consumption = 0.0
         else:
-            # If current_datetime is missing, use the legacy method
-            associated_dev = next((d for d in devices if d[0] == associated_device), None)
-            if not associated_dev and devices:
-                associated_dev = next((d for d in devices if d[0] == associated_device), None)
-            if not associated_dev and devices_file:
-                associated_dev = next((d for d in devices_file if d[0] == associated_device), None)
-
-            if associated_dev:
-                dev_name, _, _, dev_type, _, dev_state, *_ = associated_dev
+            # No real CSV: use ONLY predefined/device model.
+            if dev_name is not None and dev_type is not None:
                 if dev_state == 1:
                     new_consumption = get_device_consumption(
                         dev_name, dev_type, current_datetime, active_cycles, dev_state
