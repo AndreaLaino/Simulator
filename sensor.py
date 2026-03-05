@@ -596,12 +596,16 @@ def changeTemperature(canvas, sensor, sensors, heating_factor, delta_seconds, cu
     # Target temperature = base + device heat
     target_temp = base_temp + device_heat
 
-    # If a CSV series exists, nudge the target toward historical/replay values.
-    # With high weight (0.9), the simulation follows the CSV closely while maintaining some model stability.
+    # If a CSV series exists, blend with historical/replay values.
+    # Default behavior stays CSV-driven, but when a nearby oven is active
+    # (heating_factor>0) we increase the model contribution so local heating
+    # remains visible on temperature sensors.
     if csv_target is not None:
         try:
             csv_target = float(csv_target)
-            csv_weight = 0.9  # High weight: mostly follow CSV (0.9) with ~10% model correction
+            csv_weight = 0.9
+            if float(heating_factor or 0.0) > 0.0:
+                csv_weight = 0.65
             target_temp = (csv_target * csv_weight) + (target_temp * (1.0 - csv_weight))
         except Exception:
             pass
