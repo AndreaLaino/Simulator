@@ -10,6 +10,7 @@ def rebuild_main_interface(ctx: AppContext):
     win = ctx.window
     win.title("Simulator")
     build_home_ui(ctx)
+    a=5
 
 #Main
 def main():
