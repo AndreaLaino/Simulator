@@ -5,7 +5,7 @@ from tkinter import messagebox
 from typing import Dict, Any
 
 from sensor import sensors
-from read import read_sensors
+from read import read_sensors, read_devices
 from app.logging_setup import setup_logging
 
 logger = setup_logging("ui.bindings")
@@ -50,6 +50,51 @@ def _all_sensor_names(sensor_states: dict) -> list[str]:
     except Exception:
         pass
     return sorted(names)
+
+def _smart_meter_display_name(sensor_name: str, sensor_states: dict) -> str:
+    """Return a human-readable device label for Smart Meter logs."""
+    data = (sensor_states or {}).get(sensor_name) or {}
+    assoc = (data.get("associated_device") or "").strip()
+
+    if not assoc:
+        try:
+            for s in (sensors or []):
+                if s[0] == sensor_name and len(s) > 10 and s[10] not in (None, "", "None"):
+                    assoc = str(s[10]).strip()
+                    break
+        except Exception:
+            pass
+
+    if not assoc:
+        try:
+            for s in (read_sensors or []):
+                if s[0] == sensor_name and len(s) > 10 and s[10] not in (None, "", "None"):
+                    assoc = str(s[10]).strip()
+                    break
+        except Exception:
+            pass
+
+    if assoc:
+        try:
+            for d in (read_devices or []):
+                if isinstance(d, tuple) and len(d) > 3 and d[0] == assoc:
+                    return str(d[3]).replace("_", " ").lower()
+        except Exception:
+            pass
+
+        try:
+            from device import devices as runtime_devices
+            for d in (runtime_devices or []):
+                if hasattr(d, "name") and hasattr(d, "type") and d.name == assoc:
+                    return str(d.type).replace("_", " ").lower()
+                if isinstance(d, tuple) and len(d) > 3 and d[0] == assoc:
+                    return str(d[3]).replace("_", " ").lower()
+        except Exception:
+            pass
+
+        return assoc.replace("_", " ").lower()
+
+    return sensor_name
 
 def _load_sensor_map_json(path="sensor_map.json") -> Dict[str, Any]:
     try:
@@ -132,14 +177,16 @@ def open_bind_ip_ui(root_win: tk.Tk, sensor_states: dict):
         _save_sensor_map_json(new_map)
 
         if auto_start_var.get():
-            from smartmeter import start_logger
+            from smartmeter import start_logger, csv_path_for_device
             for sensor_name, ip in changed:
                 try:
+                    display_name = _smart_meter_display_name(sensor_name, sensor_states)
                     start_logger(
-                        device_name=sensor_name, 
+                        device_name=display_name,
                         ip=ip,
                         interval=60,
-                        device_id=sensor_name  
+                        device_id=sensor_name,
+                        csv_path=csv_path_for_device(sensor_name),
                     )
                 except Exception as e:
                     logger.warning(

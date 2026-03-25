@@ -10,7 +10,7 @@ logger = logging.getLogger("smartmeter")
 logger.setLevel(logging.INFO)
 
 DEFAULT_INTERVAL = 60  # seconds
-LOGGERS: Dict[str, "SmartMeterLogger"] = {}  # device_name -> logger
+LOGGERS: Dict[str, "SmartMeterLogger"] = {}  # logger_key (device_id or device_name) -> logger
 CSV_WRITE_LOCKS: Dict[str, threading.Lock] = {}  # filepath -> lock (one lock per file)
 
 # Rules to derive a canonical ID (case-insensitive) from the device name
@@ -175,7 +175,8 @@ def start_logger(
 ) -> SmartMeterLogger:
    
     device_name = device_name or get_device_name_from_shelly(ip, auth=auth)
-    logger_obj = LOGGERS.get(device_name)
+    logger_key = (device_id or device_name or ip).strip()
+    logger_obj = LOGGERS.get(logger_key)
     if logger_obj is None:
         logger_obj = SmartMeterLogger(
             device_name=device_name,
@@ -186,12 +187,12 @@ def start_logger(
             device_id=device_id,
             id_rules=id_rules
         )
-        LOGGERS[device_name] = logger_obj
+        LOGGERS[logger_key] = logger_obj
     logger_obj.start()
     return logger_obj
 
-def stop_logger(device_name: str):
-    logger_obj = LOGGERS.pop(device_name, None)
+def stop_logger(logger_key: str):
+    logger_obj = LOGGERS.pop(logger_key, None)
     if logger_obj:
         logger_obj.stop()
 
