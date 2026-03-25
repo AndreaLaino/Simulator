@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import os, json, tkinter as tk
+import os, re, json, tkinter as tk
 from tkinter import messagebox
 from typing import Dict, Any
 
@@ -51,6 +51,10 @@ def _all_sensor_names(sensor_states: dict) -> list[str]:
         pass
     return sorted(names)
 
+def _normalize_device_label(value: str) -> str:
+    txt = (value or "").replace("_", " ").strip().lower()
+    return re.sub(r"\s+", " ", txt)
+
 def _smart_meter_display_name(sensor_name: str, sensor_states: dict) -> str:
     """Return a human-readable device label for Smart Meter logs."""
     data = (sensor_states or {}).get(sensor_name) or {}
@@ -78,7 +82,7 @@ def _smart_meter_display_name(sensor_name: str, sensor_states: dict) -> str:
         try:
             for d in (read_devices or []):
                 if isinstance(d, tuple) and len(d) > 3 and d[0] == assoc:
-                    return str(d[3]).replace("_", " ").lower()
+                    return _normalize_device_label(str(d[3]))
         except Exception:
             pass
 
@@ -86,15 +90,15 @@ def _smart_meter_display_name(sensor_name: str, sensor_states: dict) -> str:
             from device import devices as runtime_devices
             for d in (runtime_devices or []):
                 if hasattr(d, "name") and hasattr(d, "type") and d.name == assoc:
-                    return str(d.type).replace("_", " ").lower()
+                    return _normalize_device_label(str(d.type))
                 if isinstance(d, tuple) and len(d) > 3 and d[0] == assoc:
-                    return str(d[3]).replace("_", " ").lower()
+                    return _normalize_device_label(str(d[3]))
         except Exception:
             pass
 
-        return assoc.replace("_", " ").lower()
+        return _normalize_device_label(assoc)
 
-    return sensor_name
+    return _normalize_device_label(sensor_name)
 
 def _load_sensor_map_json(path="sensor_map.json") -> Dict[str, Any]:
     try:
@@ -181,6 +185,11 @@ def open_bind_ip_ui(root_win: tk.Tk, sensor_states: dict):
             for sensor_name, ip in changed:
                 try:
                     display_name = _smart_meter_display_name(sensor_name, sensor_states)
+                    if display_name == _normalize_device_label(sensor_name):
+                        logger.warning(
+                            "Smart Meter %s has no associated device; using sensor name as device label.",
+                            sensor_name,
+                        )
                     start_logger(
                         device_name=display_name,
                         ip=ip,

@@ -188,6 +188,18 @@ def start_logger(
             id_rules=id_rules
         )
         LOGGERS[logger_key] = logger_obj
+    else:
+        # Keep existing logger instance but refresh runtime settings.
+        logger_obj.device_name = device_name or logger_obj.device_name
+        logger_obj.shelly_ip = ip or logger_obj.shelly_ip
+        logger_obj.interval = interval or logger_obj.interval
+        if auth is not None:
+            logger_obj.auth = auth
+        if device_id is not None:
+            logger_obj.device_id = device_id
+        if csv_path and csv_path != logger_obj.csv_path:
+            logger_obj.csv_path = csv_path
+            csv_ensure_header(logger_obj.csv_path)
     logger_obj.start()
     return logger_obj
 
@@ -200,7 +212,9 @@ def stop_all():
     for name in list(LOGGERS.keys()):
         stop_logger(name)
 
-# ddata loading functions
+
+
+# ---data loading functions---
 
 def load_csv(csv_path: str, device: Optional[str] = None) -> dict:
     out = {}
