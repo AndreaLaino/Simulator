@@ -267,6 +267,14 @@ def _load_scenario(ctx: AppContext, canvas, filename: str) -> None:
     draw_devices(ctx.read_devices, canvas)
     draw_doors(ctx.read_doors, canvas)
 
+    # Auto-start Smart Meter loggers only after scenario sensors are available.
+    try:
+        from common import sensor_states
+        from app.ui.bindings import autostart_bound_ip_loggers
+        autostart_bound_ip_loggers(sensor_states)
+    except Exception as e:
+        logger.warning("SmartMeter autostart after scenario load failed: %s", e)
+
     logger.info("Scenario loaded from %s", filename)
 
 

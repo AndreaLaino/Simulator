@@ -98,6 +98,29 @@ def _smart_meter_display_name(sensor_name: str, sensor_states: dict) -> str:
 
         return _normalize_device_label(assoc)
 
+    # Heuristic fallback: smart meter ids usually follow "sm_<device_name>".
+    # Example: sm_pc -> device "pc" -> type "Computer".
+    compact = (sensor_name or "").strip()
+    if compact.startswith("sm_") and len(compact) > 3:
+        guessed_dev_name = compact[3:]
+
+        try:
+            for d in (read_devices or []):
+                if isinstance(d, tuple) and len(d) > 3 and d[0] == guessed_dev_name:
+                    return _normalize_device_label(str(d[3]))
+        except Exception:
+            pass
+
+        try:
+            from device import devices as runtime_devices
+            for d in (runtime_devices or []):
+                if hasattr(d, "name") and hasattr(d, "type") and d.name == guessed_dev_name:
+                    return _normalize_device_label(str(d.type))
+                if isinstance(d, tuple) and len(d) > 3 and d[0] == guessed_dev_name:
+                    return _normalize_device_label(str(d[3]))
+        except Exception:
+            pass
+
     return _normalize_device_label(sensor_name)
 
 def _load_sensor_map_json(path="sensor_map.json") -> Dict[str, Any]:
@@ -118,6 +141,53 @@ def _save_sensor_map_json(mapping: dict, path="sensor_map.json"):
     except Exception as e:
         logger.exception("Failed to save sensor_map.json")
         messagebox.showerror("Error", f"Unable to save {path}:\n{e}")
+
+
+def autostart_bound_ip_loggers(sensor_states: dict):
+    """Start Smart Meter loggers from persisted IP mappings in sensor_map.json."""
+    mapping = _load_sensor_map_json()
+    if not mapping:
+        return
+
+    sm_sensor_names = {
+        n for n in _all_sensor_names(sensor_states)
+        if _is_smart_meter_sensor(n, sensor_states)
+    }
+
+    try:
+        from smartmeter import start_logger, csv_path_for_device
+    except Exception as e:
+        logger.warning("Cannot import smartmeter logger APIs: %s", e)
+        return
+
+    started = 0
+    for sensor_name, cfg in mapping.items():
+        if sm_sensor_names and sensor_name not in sm_sensor_names:
+            # Ignore stale entries not present in the currently loaded scenario.
+            continue
+
+        if not isinstance(cfg, dict) or cfg.get("by") != "ip":
+            continue
+
+        ip = (cfg.get("value") or "").strip()
+        if not ip:
+            continue
+
+        try:
+            display_name = _smart_meter_display_name(sensor_name, sensor_states)
+            start_logger(
+                device_name=display_name,
+                ip=ip,
+                interval=60,
+                device_id=sensor_name,
+                csv_path=csv_path_for_device(sensor_name),
+            )
+            started += 1
+        except Exception as e:
+            logger.warning("Cannot auto-start smartmeter logger for %s (%s): %s", sensor_name, ip, e)
+
+    if started:
+        logger.info("[SmartMeter] auto-started %d logger(s) from sensor_map.json", started)
 
 # ---------- Smart Meter (IP) ----------
 

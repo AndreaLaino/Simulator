@@ -27,6 +27,7 @@ from app.io.scenario import (
     import_csv_from_s3,
 )
 from app.ui.bindings import open_bind_ip_ui, open_bind_dht_ui
+from app.controllers.llm_smartmeter import open_llm_smartmeter_ui
 
 
 def _load_image(canvas_obj: tk.Canvas, file_path: str):
@@ -153,6 +154,7 @@ def build_home_ui(ctx: AppContext):
     menu_bar.add_cascade(label="Simulation", menu=sim_menu)
     sim_menu.add_command(label="Automatic", command=lambda: launch_automatic_interface(ctx))
     sim_menu.add_command(label="Manual", command=lambda: start_sim(ctx))
+    sim_menu.add_command(label="LLM Smart Meter", command=lambda: open_llm_smartmeter_ui(ctx))
     sim_menu.add_separator()
     sim_menu.add_command(label="Generate log", command=lambda: __import__("log").show_log(ctx.canvas, sensor_states, ctx.load_active))
     sim_menu.add_command(label="Activity Log", command=lambda: __import__("log").show_activity_log())
