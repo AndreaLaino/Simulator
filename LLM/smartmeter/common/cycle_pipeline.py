@@ -233,8 +233,12 @@ def _compute_k_scores(
     merge_heights = Z[:, 2]
     last = merge_heights[-k_max:]
     accel = np.diff(last, 2)
-    k_accel = k_max - int(np.argmax(accel))
-    k_accel = max(k_min, min(k_accel, k_max))
+    if accel.size == 0:
+        # Handle empty accel: fallback to k_max or another default
+        k_accel = k_max
+    else:
+        k_accel = k_max - int(np.argmax(accel))
+        k_accel = max(k_min, min(k_accel, k_max))
 
     labels_by_k: dict[int, np.ndarray] = {}
     sil_scores: list[float] = []

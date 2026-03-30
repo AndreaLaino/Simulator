@@ -1,0 +1,12 @@
+=== Optimal k detection report ===
+
+Elbow acceleration  -> k = 2
+Silhouette          -> k = 2
+Davies-Bouldin      -> k = 2
+Calinski-Harabasz   -> k = 2
+
+Cluster suggerito (voto): 2
+Cluster human-friendly: 2
+
+ k  silhouette  davies_bouldin  calinski_harabasz  largest_cluster_frac  singleton_frac  small_cluster_frac  human_score  eligible_human_rule
+ 2    0.109782        0.947993            0.37091              0.666667             0.5                 1.0        0.175                False

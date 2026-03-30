@@ -194,10 +194,13 @@ def _feature_vector(df: pd.DataFrame) -> dict[str, float]:
 
 
 def _compute_case_distances(rep_df: pd.DataFrame, partial_features: dict[str, float]) -> pd.DataFrame:
-    cols = ["duration_minutes", "max_power", "mean_power", "energy_kwh", "time_of_peak_norm"]
 
+    cols = ["duration_minutes", "max_power", "mean_power", "energy_kwh", "time_of_peak_norm"]
     work = rep_df.copy()
+    # Ensure all required columns exist; fill with NaN if missing
     for c in cols:
+        if c not in work.columns:
+            work[c] = float('nan')
         work[c] = pd.to_numeric(work[c], errors="coerce")
 
     std = work[cols].std(ddof=0).replace(0, 1).fillna(1)
