@@ -368,7 +368,19 @@ def _run_and_save(
     for c in sorted(np.unique(lbl)):
         idx = np.where(lbl == c)[0]
         D_sub = D_hybrid[np.ix_(idx, idx)]
-        best_idx = idx[np.argmin(D_sub.mean(axis=1))]
+        # Pick a representative that is both centrally connected (hybrid distance)
+        # and shape-close to the cluster mean curve to avoid visually odd outliers.
+        centrality = D_sub.mean(axis=1)
+        cluster_curves = curve_features[idx]
+        cluster_mean_curve = np.mean(cluster_curves, axis=0)
+        shape_dist = np.linalg.norm(cluster_curves - cluster_mean_curve, axis=1)
+
+        c_std = float(np.std(centrality))
+        s_std = float(np.std(shape_dist))
+        centrality_n = (centrality - float(np.mean(centrality))) / (c_std if c_std > 1e-12 else 1.0)
+        shape_dist_n = (shape_dist - float(np.mean(shape_dist))) / (s_std if s_std > 1e-12 else 1.0)
+        rep_score = 0.5 * centrality_n + 0.5 * shape_dist_n
+        best_idx = idx[int(np.argmin(rep_score))]
         reps.append(
             {
                 "cluster": int(c),

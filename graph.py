@@ -2,6 +2,7 @@ import os
 import csv
 import json
 import glob
+import pickle
 import tkinter as tk
 from tkinter import messagebox
 from tkinter import ttk
@@ -10,6 +11,7 @@ import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.ticker import MaxNLocator, FormatStrFormatter
+import numpy as np
 import pandas as pd
 
 from sensor import sensors
@@ -26,7 +28,8 @@ plt.rcParams.update({
     "legend.fontsize": 12
 })
 
-_LLM_PROFILE_PATH = "llm_smartmeter_profiles.json"
+_LLM_PROFILE_PATH = os.path.join("LLM", "smartmeter", "llm_smartmeter_profiles.json")
+_LLM_PROFILE_LEGACY_PATH = "llm_smartmeter_profiles.json"
 
 
 def _discover_selected_case_csv(appliance_key: str) -> str | None:
@@ -63,11 +66,13 @@ def _discover_selected_case_csv(appliance_key: str) -> str | None:
 
 
 def _load_llm_profiles(path: str = _LLM_PROFILE_PATH) -> dict:
+    candidate_paths = [path, _LLM_PROFILE_LEGACY_PATH]
     try:
-        if os.path.isfile(path):
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                return data if isinstance(data, dict) else {}
+        for p in candidate_paths:
+            if os.path.isfile(p):
+                with open(p, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    return data if isinstance(data, dict) else {}
     except Exception:
         pass
     return {}
@@ -143,6 +148,8 @@ def _llm_info_for_smartmeter(sensor_name: str, sensor_states: dict) -> dict:
     if isinstance(payload, dict):
         out = dict(payload)
         out.setdefault("source", "catalog")
+        if "pkl_path" not in out and "output_dir" in out:
+            out["pkl_path"] = os.path.join(str(out["output_dir"]), "llm_runtime_cycles.pkl")
         return out
 
     # Fallback for old runs where catalog file does not exist yet.
@@ -181,14 +188,330 @@ def _llm_info_for_smartmeter(sensor_name: str, sensor_states: dict) -> dict:
             "dominant_cluster_n_cycles": dominant_cluster_n_cycles,
             "selected_cluster": row.get("cluster"),
             "selected_cycle_id": row.get("cycle_id"),
+            "selected_case_path": fallback_path,
+            "output_dir": os.path.dirname(fallback_path),
+            "pkl_path": os.path.join(os.path.dirname(fallback_path), "llm_runtime_cycles.pkl"),
             "source": "selected_case_csv",
         }
     except Exception:
         return {}
 
 
+def _zscore(arr: np.ndarray) -> np.ndarray:
+    arr = np.asarray(arr, dtype=float)
+    if arr.size == 0:
+        return arr
+    mu = float(np.mean(arr))
+    sigma = float(np.std(arr))
+    if sigma < 1e-12:
+        return arr - mu
+    return (arr - mu) / sigma
+
+
+def _resample_by_index(values: np.ndarray, target_len: int = 200) -> np.ndarray:
+    values = np.asarray(values, dtype=float)
+    if values.size == 0:
+        return values
+    if values.size == 1:
+        return np.repeat(values, target_len)
+    src_x = np.linspace(0.0, 1.0, num=values.size)
+    dst_x = np.linspace(0.0, 1.0, num=target_len)
+    return np.interp(dst_x, src_x, values)
+
+
+def _find_true_runs(mask: np.ndarray) -> list[tuple[int, int]]:
+    runs: list[tuple[int, int]] = []
+    start = None
+    for i, v in enumerate(mask):
+        if v and start is None:
+            start = i
+        elif (not v) and start is not None:
+            runs.append((start, i))
+            start = None
+    if start is not None:
+        runs.append((start, len(mask)))
+    return runs
+
+
+def _extract_activity_segment(values: np.ndarray, min_len: int = 8) -> np.ndarray:
+    values = np.asarray(values, dtype=float)
+    if values.size == 0:
+        return values
+    if values.size < max(3, min_len):
+        return values
+
+    lo = float(np.percentile(values, 20))
+    hi = float(np.percentile(values, 95))
+    dyn = hi - lo
+    if dyn < 1e-6:
+        return values
+
+    threshold = lo + 0.35 * dyn
+    active = values > threshold
+    runs = [r for r in _find_true_runs(active) if (r[1] - r[0]) >= min_len]
+
+    if not runs:
+        fallback = values > float(np.percentile(values, 80))
+        runs = [r for r in _find_true_runs(fallback) if (r[1] - r[0]) >= max(4, min_len // 2)]
+        if not runs:
+            return values
+
+    def run_score(run: tuple[int, int]) -> float:
+        s, e = run
+        seg = values[s:e]
+        return float(np.clip(seg - threshold, 0.0, None).sum())
+
+    best_s, best_e = max(runs, key=run_score)
+    pad = max(2, int(0.15 * (best_e - best_s)))
+    s = max(0, best_s - pad)
+    e = min(len(values), best_e + pad)
+    return values[s:e]
+
+
+def _extract_activity_runs(values: np.ndarray, min_len: int = 8) -> list[tuple[np.ndarray, int, int]]:
+    values = np.asarray(values, dtype=float)
+    if values.size == 0:
+        return []
+
+    lo = float(np.percentile(values, 20))
+    hi = float(np.percentile(values, 95))
+    dyn = hi - lo
+    if dyn < 1e-6:
+        return [(values, 0, values.size)]
+
+    threshold = lo + 0.35 * dyn
+    active = values > threshold
+    runs = [r for r in _find_true_runs(active) if (r[1] - r[0]) >= min_len]
+    if not runs:
+        return []
+
+    out = []
+    for s, e in runs:
+        pad = max(2, int(0.12 * (e - s)))
+        rs = max(0, s - pad)
+        re = min(len(values), e + pad)
+        seg = values[rs:re]
+        if seg.size >= min_len:
+            out.append((seg, rs, re))
+    return out
+
+
+def _align_by_best_lag(a: np.ndarray, b: np.ndarray, max_lag: int = 35) -> tuple[np.ndarray, np.ndarray]:
+    a = np.asarray(a, dtype=float)
+    b = np.asarray(b, dtype=float)
+    if a.size == 0 or b.size == 0:
+        return np.array([], dtype=float), np.array([], dtype=float)
+
+    best_corr = -np.inf
+    best_pair = (a, b)
+
+    for lag in range(-max_lag, max_lag + 1):
+        if lag > 0:
+            x, y = a[lag:], b[:-lag]
+        elif lag < 0:
+            x, y = a[:lag], b[-lag:]
+        else:
+            x, y = a, b
+
+        if x.size < 20 or y.size < 20:
+            continue
+        if np.std(x) < 1e-12 or np.std(y) < 1e-12:
+            continue
+
+        corr = float(np.corrcoef(x, y)[0, 1])
+        if np.isfinite(corr) and corr > best_corr:
+            best_corr = corr
+            best_pair = (x, y)
+
+    return best_pair
+
+
+def _load_representative_cycle_values(info: dict) -> np.ndarray:
+    try:
+        cycle_id = int(float(info.get("selected_cycle_id")))
+    except Exception:
+        return np.array([], dtype=float)
+
+    pkl_path = str(info.get("pkl_path") or "").strip()
+    if not pkl_path or not os.path.isfile(pkl_path):
+        return np.array([], dtype=float)
+
+    try:
+        with open(pkl_path, "rb") as fp:
+            cycles = pickle.load(fp)
+    except Exception:
+        return np.array([], dtype=float)
+
+    if not isinstance(cycles, list):
+        return np.array([], dtype=float)
+
+    selected = None
+    for c in cycles:
+        try:
+            if int(c.get("cycle_id")) == cycle_id:
+                selected = c
+                break
+        except Exception:
+            continue
+    if not selected:
+        return np.array([], dtype=float)
+
+    df = pd.DataFrame(selected.get("data") or [])
+    if df.empty or "value" not in df.columns:
+        return np.array([], dtype=float)
+
+    vals = pd.to_numeric(df["value"], errors="coerce").dropna().to_numpy(dtype=float)
+    return vals
+
+
+def _load_cluster_mean_values(info: dict) -> np.ndarray:
+    try:
+        selected_cluster = int(float(info.get("selected_cluster")))
+        chosen_k = int(float(info.get("chosen_k")))
+    except Exception:
+        return np.array([], dtype=float)
+
+    output_dir = str(info.get("output_dir") or "").strip()
+    pkl_path = str(info.get("pkl_path") or "").strip()
+    if not output_dir or not pkl_path:
+        return np.array([], dtype=float)
+
+    clusters_csv = os.path.join(output_dir, f"results_k{chosen_k}", "clusters.csv")
+    if not os.path.isfile(clusters_csv) or not os.path.isfile(pkl_path):
+        return np.array([], dtype=float)
+
+    try:
+        df_clusters = pd.read_csv(clusters_csv)
+        df_clusters["cluster"] = pd.to_numeric(df_clusters.get("cluster"), errors="coerce")
+        df_clusters["cycle_id"] = pd.to_numeric(df_clusters.get("cycle_id"), errors="coerce")
+        cycle_ids = (
+            df_clusters[df_clusters["cluster"] == float(selected_cluster)]["cycle_id"]
+            .dropna()
+            .astype(int)
+            .tolist()
+        )
+    except Exception:
+        return np.array([], dtype=float)
+
+    if not cycle_ids:
+        return np.array([], dtype=float)
+
+    try:
+        with open(pkl_path, "rb") as fp:
+            cycles = pickle.load(fp)
+    except Exception:
+        return np.array([], dtype=float)
+
+    if not isinstance(cycles, list):
+        return np.array([], dtype=float)
+
+    by_id = {}
+    for c in cycles:
+        try:
+            by_id[int(c.get("cycle_id"))] = c
+        except Exception:
+            continue
+
+    curves = []
+    for cid in cycle_ids:
+        c = by_id.get(int(cid))
+        if not c:
+            continue
+        df = pd.DataFrame(c.get("data") or [])
+        if df.empty or "value" not in df.columns:
+            continue
+        vals = pd.to_numeric(df["value"], errors="coerce").dropna().to_numpy(dtype=float)
+        if vals.size < 10:
+            continue
+        seg = _extract_activity_segment(vals, min_len=8)
+        if seg.size < 10:
+            continue
+        curves.append(_zscore(_resample_by_index(seg, target_len=200)))
+
+    if not curves:
+        return np.array([], dtype=float)
+
+    return np.mean(np.vstack(curves), axis=0)
+
+
+def _compute_shape_similarity(df_sim: pd.DataFrame, info: dict) -> dict:
+    out = {
+        "shape_available": False,
+        "shape_corr": None,
+        "shape_rmse": None,
+        "shape_ref": None,
+        "shape_window_start": None,
+        "shape_window_end": None,
+    }
+    if df_sim is None or df_sim.empty:
+        return out
+
+    sim_series = pd.to_numeric(df_sim["value"], errors="coerce").dropna()
+    if sim_series.empty:
+        return out
+    sim_vals = sim_series.to_numpy(dtype=float)
+    rep_vals = _load_representative_cycle_values(info)
+    rep_seg = _extract_activity_segment(rep_vals, min_len=8)
+    if rep_seg.size < 10:
+        return out
+
+    sim_runs = _extract_activity_runs(sim_vals, min_len=8)
+    if not sim_runs:
+        return out
+
+    target_len = rep_seg.size
+
+    def _run_score(run_item: tuple[np.ndarray, int, int]) -> tuple[float, float]:
+        seg, _s, _e = run_item
+        # Primary: closest duration to selected cycle. Secondary: higher activity energy.
+        dur_delta = abs(float(seg.size) - float(target_len))
+        energy = float(np.clip(seg - np.percentile(seg, 20), 0.0, None).sum())
+        return (dur_delta, -energy)
+
+    sim_seg, sim_s, sim_e = min(sim_runs, key=_run_score)
+
+    sim_norm = _zscore(_resample_by_index(sim_seg, target_len=200))
+    rep_norm = _zscore(_resample_by_index(rep_seg, target_len=200))
+
+    sim_aligned, rep_aligned = _align_by_best_lag(sim_norm, rep_norm, max_lag=20)
+
+    if sim_aligned.size < 20 or rep_aligned.size < 20:
+        return out
+
+    rmse = float(np.sqrt(np.mean((sim_aligned - rep_aligned) ** 2)))
+    if np.std(sim_aligned) < 1e-12 or np.std(rep_aligned) < 1e-12:
+        corr = None
+    else:
+        corr = float(np.corrcoef(sim_aligned, rep_aligned)[0, 1])
+
+    out["shape_available"] = True
+    out["shape_corr"] = corr
+    out["shape_rmse"] = rmse
+    out["shape_ref"] = "selected_cycle"
+    try:
+        idx = sim_series.index
+        if len(idx) >= sim_e and sim_s < sim_e:
+            out["shape_window_start"] = str(pd.Timestamp(idx[sim_s]).strftime("%H:%M"))
+            out["shape_window_end"] = str(pd.Timestamp(idx[sim_e - 1]).strftime("%H:%M"))
+    except Exception:
+        pass
+    out["_sim_norm"] = sim_aligned
+    out["_rep_norm"] = rep_aligned
+    return out
+
+
 def _draw_smartmeter_info_box(ax, info: dict):
     if info:
+        shape_corr = info.get("shape_corr")
+        shape_rmse = info.get("shape_rmse")
+        shape_ref = str(info.get("shape_ref") or "-")
+        shape_win_s = str(info.get("shape_window_start") or "-")
+        shape_win_e = str(info.get("shape_window_end") or "-")
+        shape_line = (
+            f"shape[{shape_ref}]: corr={shape_corr:.3f}, rmse={shape_rmse:.3f}"
+            if isinstance(shape_corr, (float, int)) and isinstance(shape_rmse, (float, int))
+            else "shape: unavailable"
+        )
         lines = [
             f"LLM source: {info.get('source', '?')}",
             f"appliance: {info.get('appliance_key', '?')}",
@@ -196,6 +519,8 @@ def _draw_smartmeter_info_box(ax, info: dict):
             f"dominant cluster: {info.get('dominant_cluster', '?')} (n={info.get('dominant_cluster_n_cycles', '?')})",
             f"selected cluster: {info.get('selected_cluster', '?')}",
             f"selected cycle: {info.get('selected_cycle_id', '?')}",
+            f"window(sim): {shape_win_s} -> {shape_win_e}",
+            shape_line,
         ]
     else:
         lines = [
@@ -447,14 +772,15 @@ def show_graphs(canvas, sensor_states):
         else:
             # Plot simulated data
             if not df.empty:
+                sim_color = 'blue' if sensor_type == "Smart Meter" else 'blue'
                 unique_vals = set(df["value"].dropna().unique().tolist())
                 is_binary = unique_vals.issubset({0.0, 1.0})
                 if is_binary and sensor_type not in ("Smart Meter", "Temperature"):
-                    ax.plot(df.index, df["value"], drawstyle='steps-post', marker='o', linestyle='-', label=f"{sensor} (sim)", color='blue')
+                    ax.plot(df.index, df["value"], drawstyle='steps-post', marker='o', linestyle='-', label=f"{sensor} (sim)", color=sim_color)
                     ax.set_ylim(-0.1, 1.1)
                     ax.set_yticks([0, 1])
                 else:
-                    ax.plot(df.index, df["value"], linestyle='-', linewidth=1.5, marker='o', markersize=2, label=f"{sensor} (sim)", color='blue')
+                    ax.plot(df.index, df["value"], linestyle='-', linewidth=1.5, marker='o', markersize=2, label=f"{sensor} (sim)", color=sim_color)
             
             # Plot real data if available
             if not df_real.empty:
@@ -469,6 +795,8 @@ def show_graphs(canvas, sensor_states):
         title = f"{sensor} - {date_str}"
         if sensor_type == "Smart Meter":
             info = _llm_info_for_smartmeter(sensor, sensor_states)
+            sim_cmp = _compute_shape_similarity(df, info)
+            info.update({k: v for k, v in sim_cmp.items() if not str(k).startswith("_")})
             _draw_smartmeter_info_box(ax, info)
         ax.set_title(title)
         ax.set_xlabel("Time")
@@ -613,14 +941,15 @@ def show_graphs_auto(sensor_states, selected_keys, target_frame):
         else:
             # Plot simulated data
             if not df.empty:
+                sim_color = 'blue' if sensor_type == "Smart Meter" else 'blue'
                 unique_vals = set(df["value"].dropna().unique().tolist())
                 is_binary = unique_vals.issubset({0.0, 1.0})
                 if is_binary and sensor_type not in ("Smart Meter", "Temperature"):
-                    ax.plot(df.index, df["value"], drawstyle='steps-post', marker='o', linestyle='-', label=f"{sensor} (sim)", color='blue')
+                    ax.plot(df.index, df["value"], drawstyle='steps-post', marker='o', linestyle='-', label=f"{sensor} (sim)", color=sim_color)
                     ax.set_ylim(-0.1, 1.1)
                     ax.set_yticks([0, 1])
                 else:
-                    ax.plot(df.index, df["value"], linestyle='-', linewidth=1.5, marker='o', markersize=2, label=f"{sensor} (sim)", color='blue')
+                    ax.plot(df.index, df["value"], linestyle='-', linewidth=1.5, marker='o', markersize=2, label=f"{sensor} (sim)", color=sim_color)
             
             # Plot real data if available
             if not df_real.empty:
@@ -629,6 +958,8 @@ def show_graphs_auto(sensor_states, selected_keys, target_frame):
         title = f"Sensor trend: {sensor}"
         if sensor_type == "Smart Meter":
             info = _llm_info_for_smartmeter(sensor, sensor_states)
+            sim_cmp = _compute_shape_similarity(df, info)
+            info.update({k: v for k, v in sim_cmp.items() if not str(k).startswith("_")})
             _draw_smartmeter_info_box(ax, info)
         ax.set_title(title)
         ax.set_xlabel("Time")

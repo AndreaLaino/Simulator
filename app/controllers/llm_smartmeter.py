@@ -5,6 +5,7 @@ import importlib.util
 import json
 import math
 import re
+import shutil
 import sys
 import threading
 from dataclasses import dataclass
@@ -75,7 +76,7 @@ def _upsert_runtime_profile(
     selected_cycle_id: int,
 ) -> Path:
     """Persist the latest LLM selection so runtime smart meters can replay it."""
-    catalog_path = BASE_DIR / "llm_smartmeter_profiles.json"
+    catalog_path = LLM_SM_DIR / "llm_smartmeter_profiles.json"
     payload = {
         "appliance_key": appliance_key,
         "output_dir": str(output_dir),
@@ -284,9 +285,14 @@ def _run_llm_pipeline(
 
     cfg = APPLIANCE_OPTIONS[appliance_label]
     appliance_key = cfg["key"]
-    session_dir = get_or_create_current_save_session(suffix="llm")
-    output_dir = session_dir / "llm" / cfg["folder"] / cfg["output"]
+    # Canonical modular output per appliance (stable location expected by users/tools).
+    output_dir = LLM_SM_DIR / cfg["folder"] / cfg["output"]
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Keep a session-scoped mirror as historical archive.
+    session_dir = get_or_create_current_save_session(suffix="llm")
+    session_output_dir = session_dir / "llm" / cfg["folder"] / cfg["output"]
+    session_output_dir.mkdir(parents=True, exist_ok=True)
 
     df = _load_time_value_csv(csv_path)
     runtime_tsv = output_dir / "llm_runtime_input.tsv"
@@ -305,6 +311,14 @@ def _run_llm_pipeline(
         params=params,
         exact_k=exact_k,
     )
+
+    # Mirror latest canonical outputs into the current session archive.
+    for item in output_dir.iterdir():
+        dst = session_output_dir / item.name
+        if item.is_dir():
+            shutil.copytree(item, dst, dirs_exist_ok=True)
+        else:
+            shutil.copy2(item, dst)
 
     if k_mode == "custom":
         chosen_k = int(custom_k)
@@ -361,8 +375,40 @@ def _run_llm_pipeline(
     cases_eval_csv = output_dir / f"cases_evaluation_k{chosen_k}.csv"
     ranked.to_csv(cases_eval_csv, index=False)
 
-    dominant_ranked = ranked[ranked["cluster"] == dominant_cluster].reset_index(drop=True)
-    best = dominant_ranked.iloc[[0]].copy() if not dominant_ranked.empty else ranked.iloc[[0]].copy()
+    dominant_ranked = ranked[ranked["cluster"] == dominant_cluster].copy().reset_index(drop=True)
+    if not dominant_ranked.empty:
+        feat_cols = ["duration_minutes", "max_power", "mean_power", "energy_kwh", "time_of_peak_norm"]
+        for c in feat_cols:
+            dominant_ranked[c] = pd.to_numeric(dominant_ranked[c], errors="coerce")
+
+        center = dominant_ranked[feat_cols].mean(skipna=True)
+        std = dominant_ranked[feat_cols].std(ddof=0).replace(0, 1).fillna(1)
+
+        def _center_dist(row: pd.Series) -> float:
+            acc = 0.0
+            used = 0
+            for c in feat_cols:
+                v = row.get(c)
+                if pd.isna(v) or pd.isna(center[c]):
+                    continue
+                z = (float(v) - float(center[c])) / float(std[c])
+                acc += z * z
+                used += 1
+            return math.sqrt(acc / max(1, used))
+
+        dominant_ranked["distance_to_cluster_center"] = dominant_ranked.apply(_center_dist, axis=1)
+        dominant_ranked["selection_score"] = (
+            dominant_ranked["distance_to_last_incomplete_day"]
+            + 0.35 * dominant_ranked["distance_to_cluster_center"]
+        )
+        dominant_ranked = dominant_ranked.sort_values(
+            ["selection_score", "distance_to_last_incomplete_day"],
+            ascending=[True, True],
+            kind="mergesort",
+        ).reset_index(drop=True)
+        best = dominant_ranked.iloc[[0]].copy()
+    else:
+        best = ranked.iloc[[0]].copy()
     selected_case_csv = output_dir / "selected_case_latest_incomplete_day.csv"
     best.to_csv(selected_case_csv, index=False)
 

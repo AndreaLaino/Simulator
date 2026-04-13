@@ -9,10 +9,12 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from common.cycle_pipeline import run_cycle_pipeline
+from common.io_bootstrap import resolve_input_tsv
 from common.params import ask_for_exact_k, choose_config
 
 
 BASE_DIR = Path(__file__).resolve().parent
+APPLIANCE_KEY = "computer"
 INPUT_PATH = BASE_DIR / "computer_data.tsv"
 OUTPUT_DIR = BASE_DIR / "computer_case_output"
 PKL_PATH = OUTPUT_DIR / "cycles_raw_data.pkl"
@@ -45,11 +47,12 @@ def choose_k_mode(args: argparse.Namespace, params: dict) -> int | None:
 
 def main() -> None:
     args = parse_args()
-    params = choose_config("computer", custom_path_arg=args.config)
+    params = choose_config(APPLIANCE_KEY, custom_path_arg=args.config)
     exact_k = choose_k_mode(args, params)
+    input_path = resolve_input_tsv(BASE_DIR, APPLIANCE_KEY, OUTPUT_DIR)
 
     run_cycle_pipeline(
-        input_path=INPUT_PATH,
+        input_path=input_path,
         output_dir=OUTPUT_DIR,
         pkl_path=PKL_PATH,
         chart_title_prefix="computer",

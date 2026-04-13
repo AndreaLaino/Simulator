@@ -24,9 +24,12 @@ TEMP_RECENT: dict[str, deque] = {}
 TEMP_GREEN_UNTIL: dict[str, float] = {}
 TEMP_BASELINE: dict[str, float] = {}
 
-LLM_PROFILE_CATALOG_PATH = Path("llm_smartmeter_profiles.json")
+_BASE_DIR = Path(__file__).resolve().parent
+LLM_PROFILE_CATALOG_PATH = _BASE_DIR / "LLM" / "smartmeter" / "llm_smartmeter_profiles.json"
+LLM_PROFILE_CATALOG_LEGACY_PATH = _BASE_DIR / "llm_smartmeter_profiles.json"
 LLM_PROFILE_CATALOG_CACHE: Optional[dict] = None
 LLM_PROFILE_CATALOG_MTIME: Optional[float] = None
+LLM_PROFILE_CATALOG_ACTIVE_PATH: Optional[Path] = None
 LLM_CYCLE_CURVE_CACHE: dict[tuple[str, int], Optional[tuple[list[float], list[float]]]] = {}
 LLM_SENSOR_ON_START: dict[str, datetime] = {}
 
@@ -670,22 +673,32 @@ def _device_type_to_appliance_key(dev_type: Optional[str]) -> Optional[str]:
 
 
 def _load_llm_profile_catalog() -> dict:
-    global LLM_PROFILE_CATALOG_CACHE, LLM_PROFILE_CATALOG_MTIME
+    global LLM_PROFILE_CATALOG_CACHE, LLM_PROFILE_CATALOG_MTIME, LLM_PROFILE_CATALOG_ACTIVE_PATH
     try:
-        if not LLM_PROFILE_CATALOG_PATH.exists():
+        catalog_path = LLM_PROFILE_CATALOG_PATH
+        if not catalog_path.exists() and LLM_PROFILE_CATALOG_LEGACY_PATH.exists():
+            catalog_path = LLM_PROFILE_CATALOG_LEGACY_PATH
+
+        if not catalog_path.exists():
             LLM_PROFILE_CATALOG_CACHE = {}
             LLM_PROFILE_CATALOG_MTIME = None
+            LLM_PROFILE_CATALOG_ACTIVE_PATH = None
             return {}
 
-        mtime = float(LLM_PROFILE_CATALOG_PATH.stat().st_mtime)
-        if LLM_PROFILE_CATALOG_CACHE is not None and LLM_PROFILE_CATALOG_MTIME == mtime:
+        mtime = float(catalog_path.stat().st_mtime)
+        if (
+            LLM_PROFILE_CATALOG_CACHE is not None
+            and LLM_PROFILE_CATALOG_MTIME == mtime
+            and LLM_PROFILE_CATALOG_ACTIVE_PATH == catalog_path
+        ):
             return LLM_PROFILE_CATALOG_CACHE
 
-        data = json.loads(LLM_PROFILE_CATALOG_PATH.read_text(encoding="utf-8"))
+        data = json.loads(catalog_path.read_text(encoding="utf-8"))
         if not isinstance(data, dict):
             data = {}
         LLM_PROFILE_CATALOG_CACHE = data
         LLM_PROFILE_CATALOG_MTIME = mtime
+        LLM_PROFILE_CATALOG_ACTIVE_PATH = catalog_path
         return data
     except Exception:
         return {}
