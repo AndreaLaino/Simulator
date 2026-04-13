@@ -8,6 +8,7 @@ from __future__ import annotations
 import io
 import csv
 import json
+import os
 from typing import Optional, List, Dict, Any
 from tkinter import messagebox
 import tkinter as tk
@@ -21,6 +22,7 @@ except ImportError:
     BOTO3_AVAILABLE = False
 
 from app.logging_setup import setup_logging
+from app.save_paths import ensure_devices_dir
 
 logger = setup_logging("io.aws_import")
 
@@ -386,7 +388,7 @@ class AWSS3ImportUI:
                 
                 if sensor_name:
                     sensor_name = sensor_name.strip()
-                    local_path = f"logs/dht_{sensor_name}.csv"
+                    local_path = os.path.join(str(ensure_devices_dir()), f"dht_{sensor_name}.csv")
                 else:
                     messagebox.showwarning("Cancelled", "Import cancelled.")
                     self.status_label.config(text="Import cancelled", fg="orange")

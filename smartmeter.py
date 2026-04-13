@@ -5,11 +5,13 @@ import os, csv, time, threading, logging, requests, glob
 from typing import Optional, Dict, List, Tuple
 from datetime import datetime
 import pandas as pd
+from app.save_paths import ensure_devices_dir
 
 logger = logging.getLogger("smartmeter")
 logger.setLevel(logging.INFO)
 
 DEFAULT_INTERVAL = 60  # seconds
+DEVICES_DIR = str(ensure_devices_dir())
 LOGGERS: Dict[str, "SmartMeterLogger"] = {}  # logger_key (device_id or device_name) -> logger
 CSV_WRITE_LOCKS: Dict[str, threading.Lock] = {}  # filepath -> lock (one lock per file)
 
@@ -33,7 +35,7 @@ def _sanitize(name: str) -> str:
 
 def csv_path_for_device(device_name: str) -> str:
     safe = _sanitize(device_name or "device")
-    return os.path.join("logs", f"smartmeter_{safe}.csv")
+    return os.path.join(DEVICES_DIR, f"smartmeter_{safe}.csv")
 
 def csv_ensure_header(path: str):
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
@@ -257,7 +259,7 @@ def load_power_df(csv_path: str, device: Optional[str] = None, rule: str = "1min
     result = df.resample(rule).max()
     return result.fillna(0)
 
-def load_power_by_device_id_any_csv(device_id_wanted: str, logs_dir="logs") -> pd.DataFrame:
+def load_power_by_device_id_any_csv(device_id_wanted: str, logs_dir=DEVICES_DIR) -> pd.DataFrame:
     want = _canon_id(device_id_wanted)
     rows = []
     for path in glob.glob(os.path.join(logs_dir, "smartmeter_*.csv")):
@@ -279,7 +281,7 @@ def load_power_by_device_id_any_csv(device_id_wanted: str, logs_dir="logs") -> p
     df = df.dropna(subset=["timestamp"]).sort_values("timestamp").set_index("timestamp")
     return df.resample("1min").max().fillna(0)
 
-def load_power_by_ip_any_csv(ip_wanted: str, logs_dir="logs") -> pd.DataFrame:
+def load_power_by_ip_any_csv(ip_wanted: str, logs_dir=DEVICES_DIR) -> pd.DataFrame:
     rows = []
     for path in glob.glob(os.path.join(logs_dir, "smartmeter_*.csv")):
         try:

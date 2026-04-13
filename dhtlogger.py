@@ -4,10 +4,12 @@ import os, csv, time, threading, logging, glob
 from typing import Optional, Tuple
 from datetime import datetime
 import pandas as pd
+from app.save_paths import ensure_devices_dir
 
 logger = logging.getLogger("dht")
 logger.setLevel(logging.INFO)
 
+DEVICES_DIR = str(ensure_devices_dir())
 _USE_CPY = False
 _USE_ADA = False
 try:
@@ -29,7 +31,7 @@ def _sanitize(name: str) -> str:
 
 def csv_path_for_label(label: str) -> str:
     safe = _sanitize(label or "sensor")
-    return os.path.join("logs", f"dht_{safe}.csv")
+    return os.path.join(DEVICES_DIR, f"dht_{safe}.csv")
 
 def csv_ensure_header(path: str):
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
@@ -170,7 +172,7 @@ def _df_from_rows(rows: list[dict]) -> pd.DataFrame:
     return df.resample("1min").median()
 
 
-def load_temp_by_label_any_csv(label: str, logs_dir="logs") -> pd.DataFrame:
+def load_temp_by_label_any_csv(label: str, logs_dir=DEVICES_DIR) -> pd.DataFrame:
     """Load temperature data for the given sensor label from any CSV in logs_dir."""
     path = os.path.join(logs_dir, f"dht_{_sanitize(label)}.csv")
     rows = []
@@ -186,7 +188,7 @@ def load_temp_by_label_any_csv(label: str, logs_dir="logs") -> pd.DataFrame:
     return _df_from_rows(rows)
 
 # fallback
-def load_temp_by_gpio_any_csv(gpio: int, logs_dir="logs") -> pd.DataFrame:
+def load_temp_by_gpio_any_csv(gpio: int, logs_dir=DEVICES_DIR) -> pd.DataFrame:
     """load temperature data for the given GPIO BCM pin from any CSV in logs_dir."""
     rows = []
     for path in glob.glob(os.path.join(logs_dir, "dht_*.csv")):

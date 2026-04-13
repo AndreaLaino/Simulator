@@ -15,6 +15,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from app.context import AppContext
 from app.logging_setup import setup_logging
+from app.save_paths import get_or_create_current_save_session
 
 logger = setup_logging("controllers.llm_smartmeter")
 
@@ -241,8 +242,8 @@ def _run_llm_pipeline(
 
     cfg = APPLIANCE_OPTIONS[appliance_label]
     appliance_key = cfg["key"]
-    appliance_dir = LLM_SM_DIR / cfg["folder"]
-    output_dir = appliance_dir / cfg["output"]
+    session_dir = get_or_create_current_save_session(suffix="llm")
+    output_dir = session_dir / "llm" / cfg["folder"] / cfg["output"]
     output_dir.mkdir(parents=True, exist_ok=True)
 
     df = _load_time_value_csv(csv_path)

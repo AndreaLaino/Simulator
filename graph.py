@@ -226,11 +226,11 @@ def show_graphs(canvas, sensor_states):
         if sensor_type == "Temperature":
             gpio = _get_binding_dht_gpio(sensor)
             if gpio is not None:
-                df_real = dhtlogger.load_temp_by_gpio_any_csv(gpio, logs_dir="logs")
+                df_real = dhtlogger.load_temp_by_gpio_any_csv(gpio, logs_dir="devices")
         elif sensor_type == "Smart Meter":
             ip = _get_binding_ip(sensor)
             if ip is not None:
-                df_real = smartmeter.load_power_by_ip_any_csv(ip, logs_dir="logs")
+                df_real = smartmeter.load_power_by_ip_any_csv(ip, logs_dir="devices")
         
         # Rebase real data to match simulated timeline
         if not df_real.empty and not df.empty:
@@ -389,11 +389,11 @@ def show_graphs_auto(sensor_states, selected_keys, target_frame):
         if sensor_type == "Temperature":
             gpio = _get_binding_dht_gpio(sensor)
             if gpio is not None:
-                df_real = dhtlogger.load_temp_by_gpio_any_csv(gpio, logs_dir="logs")
+                df_real = dhtlogger.load_temp_by_gpio_any_csv(gpio, logs_dir="devices")
         elif sensor_type == "Smart Meter":
             ip = _get_binding_ip(sensor)
             if ip is not None:
-                df_real = smartmeter.load_power_by_ip_any_csv(ip, logs_dir="logs")
+                df_real = smartmeter.load_power_by_ip_any_csv(ip, logs_dir="devices")
         
         # Rebase real data to match simulated timeline
         if not df_real.empty and not df.empty:

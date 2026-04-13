@@ -28,6 +28,7 @@ except ImportError:
     PANDAS_AVAILABLE = False
 
 from app.logging_setup import setup_logging
+from app.save_paths import ensure_devices_dir
 
 logger = setup_logging("io.aws_telemetry")
 
@@ -290,7 +291,7 @@ class AWSTelemetryImportUI:
         btn_frame = tk.Frame(self.window)
         btn_frame.pack(fill=tk.X, padx=10, pady=10)
         
-        self.import_btn = tk.Button(btn_frame, text="Import to logs/", command=self._import_data, state="disabled")
+        self.import_btn = tk.Button(btn_frame, text="Import to devices/", command=self._import_data, state="disabled")
         self.import_btn.pack(side="left", padx=5)
         
         self.import_all_btn = tk.Button(btn_frame, text="Import ALL to one CSV", command=self._import_all, state="disabled")
@@ -464,8 +465,7 @@ class AWSTelemetryImportUI:
         
         print(f"DEBUG: original='{original_name}', sanitized='{_sanitize_name(original_name)}', data_type='{data_type}', final='{output_name}'")
         
-        logs_dir = "logs"
-        os.makedirs(logs_dir, exist_ok=True)
+        logs_dir = str(ensure_devices_dir())
         
         self.status_label.config(text=f"Importing {len(files)} file(s)...", fg="blue")
         self.window.update()
@@ -535,8 +535,7 @@ class AWSTelemetryImportUI:
         elif process_as == "smartmeter" and not output_name.startswith("smartmeter_"):
             output_name = f"smartmeter_{output_name}"
         
-        logs_dir = "logs"
-        os.makedirs(logs_dir, exist_ok=True)
+        logs_dir = str(ensure_devices_dir())
 
         self.status_label.config(text=f"Importing ALL files from '{self.selected_bucket}'...", fg="blue")
         self.window.update()
@@ -620,8 +619,7 @@ class AWSTelemetryImportUI:
         if not output_name:
             return
         output_name = _sanitize_name(output_name)
-        logs_dir = "logs"
-        os.makedirs(logs_dir, exist_ok=True)
+        logs_dir = str(ensure_devices_dir())
 
         self.status_label.config(text=f"Combining ALL JSON from '{self.selected_bucket}'...", fg="blue")
         self.window.update()

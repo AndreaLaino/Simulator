@@ -5,6 +5,7 @@ import os
 from datetime import datetime
 from read import read_sensors
 from sensor import sensors
+from app.save_paths import create_new_save_session, ensure_saves_dir, get_or_create_current_save_session
 
 activity_log = []  # list of dictionaries: {"activity": . "start": . "end": .}
 active_activities = {}  # dict: {"cooking": "00:05", "laundry": "00:06"}
@@ -69,8 +70,10 @@ def show_activity_log():
             text_box.insert(tk.END, "-" * 60 + "\n")
 
     def save():
-        save_activity_log()
-        messagebox.showinfo("Success", "Activity log saved in 'activity_log.csv'")
+        session_dir = get_or_create_current_save_session(suffix="logs")
+        file_path = session_dir / "activity_log.csv"
+        save_activity_log(str(file_path))
+        messagebox.showinfo("Success", f"Activity log saved in:\n{file_path}")
 
     tk.Button(log_window, text="Save activity log", command=save).pack(pady=10)
 
@@ -139,10 +142,12 @@ def show_log(canvas, sensor_states, load_active):
                 consumption_list = [None] * len(time_list)
 
             default_name = f"{sensore_name}_log.csv".replace(" ", "_")
+            saves_dir = ensure_saves_dir()
             out_path = filedialog.asksaveasfilename(
                 title=f"Save log for {sensore_name}",
                 defaultextension=".csv",
                 initialfile=default_name,
+                initialdir=str(saves_dir),
                 filetypes=[("CSV", "*.csv")]
             )
             if not out_path:
@@ -171,12 +176,13 @@ def show_log(canvas, sensor_states, load_active):
             var.set(new_val)
 
     def save_selected_logs():
-        # save with default name)
+        # save with default name in saves session)
         selected = [s for s, var in sensor_selection.items() if var.get()]
         if not selected:
             messagebox.showwarning("Warning", "Select at least one sensor.")
             return
 
+        session_dir = get_or_create_current_save_session(suffix="logs")
         for sensor_name in selected:
             if sensor_name in sensor_states:
                 sensor_data = sensor_states[sensor_name]
@@ -190,15 +196,16 @@ def show_log(canvas, sensor_states, load_active):
                     consumption_list = [None] * len(time_list)
 
                 filename = f"{sensor_name}_log.csv".replace(" ", "_")
+                file_path = session_dir / filename
                 try:
-                    with open(filename, mode="w", newline="", encoding="utf-8") as file:
+                    with open(file_path, mode="w", newline="", encoding="utf-8") as file:
                         writer = csv.writer(file)
                         writer.writerow(["time", "state", "consumption", "type", "x", "y"])
                         for t, s, c in zip(time_list, state_list, consumption_list):
                             writer.writerow([t, s, c, sensor_type, x, y])
                 except Exception as e:
                     messagebox.showerror("Error", f"Impossible to save '{filename}': {e}")
-        messagebox.showinfo("Success", "Log saved.")
+        messagebox.showinfo("Success", f"Log saved in:\n{session_dir}")
 
     def open_detail_window():
         selected = [s for s, var in sensor_selection.items() if var.get()]
@@ -243,10 +250,12 @@ def show_log(canvas, sensor_states, load_active):
                     text_box.insert(tk.END, f"{entry['activity']}\t{entry['start']}\t{entry['end']}\n")
 
             def save_activity_log_tab():
+                saves_dir = ensure_saves_dir()
                 out_path = filedialog.asksaveasfilename(
                     title="Save activity log",
                     defaultextension=".csv",
                     initialfile="activity_log.csv",
+                    initialdir=str(saves_dir),
                     filetypes=[("CSV", "*.csv")]
                 )
                 if not out_path:
@@ -308,16 +317,14 @@ _interaction_file = None
 
 def start_interaction_log_session(session_label: str = ""):
     global _interaction_session_dir, _interaction_file_path, _interaction_file
-    os.makedirs("logs", exist_ok=True)
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    folder_name = f"{stamp}_manual"
-
+    suffix = "manual"
     if session_label:
         safe = str(session_label).replace(":", "").replace("/", "-").replace("\\", "-").strip()
         if safe:
-            folder_name += f"_{safe}"
-    _interaction_session_dir = os.path.join("logs", folder_name)
-    os.makedirs(_interaction_session_dir, exist_ok=True)
+            suffix = f"manual_{safe}"
+
+    session_dir = create_new_save_session(suffix=suffix)
+    _interaction_session_dir = str(session_dir)
     _interaction_file_path = os.path.join(_interaction_session_dir, "interactions.csv")
     _interaction_file = open(_interaction_file_path, mode="w", newline="", encoding="utf-8")
     import csv as _csv
@@ -340,8 +347,7 @@ def stop_interaction_log_session():
 def append_interaction_row(row):
     global _interaction_file
     if _interaction_file is None:
-        # Avoid auto-creating a second session; require explicit start.
-        print("[LOG] Interaction Session not started; row skipped.")
+        # Ignore early events before the session file is opened.
         return
     try:
         import csv as _csv

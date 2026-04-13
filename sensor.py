@@ -670,7 +670,7 @@ def _get_intraday_power_pattern(device_id: str, time_of_day_minutes: float, wind
     # Load historical data
     df = None
     try:
-        df = smartmeter.load_power_by_device_id_any_csv(device_id, logs_dir="logs")
+        df = smartmeter.load_power_by_device_id_any_csv(device_id, logs_dir="devices")
     except Exception:
         pass
     
@@ -749,7 +749,7 @@ def get_replay_smart_meter_consumption(device_id: str, current_datetime: Optiona
         return None
     
     try:
-        df = smartmeter.load_power_by_device_id_any_csv(device_id, logs_dir="logs")
+        df = smartmeter.load_power_by_device_id_any_csv(device_id, logs_dir="devices")
     except Exception:
         return None
     
@@ -813,7 +813,7 @@ def _has_real_smart_meter_data(device_id: str) -> bool:
         return False
 
     try:
-        df = smartmeter.load_power_by_device_id_any_csv(device_id, logs_dir="logs")
+        df = smartmeter.load_power_by_device_id_any_csv(device_id, logs_dir="devices")
     except Exception:
         return False
 
@@ -854,7 +854,7 @@ def _mean_power_for_smart_meter(device_id: str, min_power_w: float = 0.0) -> Opt
         return None
 
     try:
-        df = smartmeter.load_power_by_device_id_any_csv(device_id, logs_dir="logs")
+        df = smartmeter.load_power_by_device_id_any_csv(device_id, logs_dir="devices")
     except Exception:
         return None
 

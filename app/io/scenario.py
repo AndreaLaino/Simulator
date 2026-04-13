@@ -15,6 +15,7 @@ from read import (
 )
 from app.context import AppContext
 from app.logging_setup import setup_logging
+from app.save_paths import ensure_houses_dir, ensure_saves_dir, ensure_devices_dir
 from models import Point, Sensor, Device, Door
 
 
@@ -640,8 +641,7 @@ def import_csv_from_s3(parent=None) -> None:
         base_name = f"smartmeter_{base_name}"
 
     # Import files
-    logs_dir = "logs"
-    os.makedirs(logs_dir, exist_ok=True)
+    logs_dir = str(ensure_devices_dir())
 
     # Warn if too many files
     if len(selected_files) > 100:
@@ -795,8 +795,7 @@ def import_csv(parent=None) -> None:
     elif sim_type == "Smart Meter" and not base_name.startswith("smartmeter_"):
         base_name = f"smartmeter_{base_name}"
 
-    logs_dir = "logs"
-    os.makedirs(logs_dir, exist_ok=True)
+    logs_dir = str(ensure_devices_dir())
 
     dest_name = f"{base_name}.csv"
     dest_path = os.path.join(logs_dir, dest_name)
@@ -862,19 +861,17 @@ def import_csv(parent=None) -> None:
 
     messagebox.showinfo("Import", f"Imported {imported} file(s) into {logs_dir}/\nMode: {action.capitalize()}\nDedup: timestamp duplicates kept as latest")
 def export_simulation_csv() -> None:
-    """Export the latest 'interactions.csv' from logs to a chosen location."""
-    logs_root = "logs"
+    """Export the latest 'interactions.csv' from saves to a chosen location."""
+    logs_root = str(ensure_saves_dir())
     if not os.path.isdir(logs_root):
-        messagebox.showwarning("No logs", "Folder 'logs' not found.\nStart a manual simulation before exporting.")
+        messagebox.showwarning("No logs", "Folder 'saves' not found.\nStart a manual simulation before exporting.")
         return
 
     candidates = []
-    for name in os.listdir(logs_root):
-        folder = os.path.join(logs_root, name)
-        if os.path.isdir(folder):
-            csv_path = os.path.join(folder, "interactions.csv")
-            if os.path.isfile(csv_path):
-                candidates.append((os.path.getmtime(csv_path), csv_path))
+    for root, _dirs, files in os.walk(logs_root):
+        if "interactions.csv" in files:
+            csv_path = os.path.join(root, "interactions.csv")
+            candidates.append((os.path.getmtime(csv_path), csv_path))
 
     if not candidates:
         messagebox.showwarning("No file", "'interactions.csv' not found.\nStart a manual simulation and retry.")
@@ -903,10 +900,12 @@ def export_simulation_csv() -> None:
 
 def save_scenario_as(ctx: AppContext) -> None:
     """Save As... – always ask for a new file path."""
+    houses_dir = ensure_houses_dir()
     filename = filedialog.asksaveasfilename(
         title="Save scenario as",
         defaultextension=".csv",
         initialfile="saved.csv",
+        initialdir=str(houses_dir),
         filetypes=[("Scenario files", "*.csv"), ("All files", "*.*")]
     )
     if not filename:

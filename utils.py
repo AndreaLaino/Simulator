@@ -11,7 +11,7 @@ from models import Sensor, Device, Point, Door, Wall
 _REAL_TEMP_CACHE: dict[str, bool] = {}
 
 
-def _is_real_temperature_sensor(sensor_name: str, logs_dir: str = "logs") -> bool:
+def _is_real_temperature_sensor(sensor_name: str, logs_dir: str = "devices") -> bool:
     """Return True if this Temperature sensor is backed by real DHT logs.
 
     We detect it by:
