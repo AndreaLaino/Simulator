@@ -1,6 +1,7 @@
 import os
 import csv
 import json
+import glob
 import tkinter as tk
 from tkinter import messagebox
 from tkinter import ttk
@@ -12,9 +13,9 @@ from matplotlib.ticker import MaxNLocator, FormatStrFormatter
 import pandas as pd
 
 from sensor import sensors
-from read import read_sensors
+from read import read_sensors, read_devices
+from device import devices
 import dhtlogger
-import smartmeter
 from models import Sensor, Device
 
 plt.rcParams.update({
@@ -24,6 +25,194 @@ plt.rcParams.update({
     "ytick.labelsize": 12,
     "legend.fontsize": 12
 })
+
+_LLM_PROFILE_PATH = "llm_smartmeter_profiles.json"
+
+
+def _discover_selected_case_csv(appliance_key: str) -> str | None:
+    """Find selected_case_latest_incomplete_day.csv for the appliance, tolerant to folder typos."""
+    if not appliance_key:
+        return None
+
+    # Generic search first: robust to naming variants (e.g. Computer vs Computerr).
+    pattern = os.path.join(
+        "LLM",
+        "smartmeter",
+        "*",
+        "*",
+        "selected_case_latest_incomplete_day.csv",
+    )
+    candidates = sorted(glob.glob(pattern))
+
+    # Prefer paths that contain the appliance key text.
+    key_tokens = {
+        "computer": ["computer"],
+        "coffee_machine": ["coffee", "machine"],
+        "dishwasher": ["dishwasher"],
+        "refrigerator": ["refrigerator", "fridge"],
+        "washing_machine": ["washing", "machine"],
+    }.get(appliance_key, [appliance_key])
+
+    for p in candidates:
+        low = p.replace("\\", "/").lower()
+        if all(tok in low for tok in key_tokens):
+            return p
+
+    # If nothing matches tokens, return first discovered file as last resort.
+    return candidates[0] if candidates else None
+
+
+def _load_llm_profiles(path: str = _LLM_PROFILE_PATH) -> dict:
+    try:
+        if os.path.isfile(path):
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return data if isinstance(data, dict) else {}
+    except Exception:
+        pass
+    return {}
+
+
+def _appliance_key_from_device_type(device_type: str | None) -> str | None:
+    mapping = {
+        "computer": "computer",
+        "coffee_machine": "coffee_machine",
+        "dishwasher": "dishwasher",
+        "refrigerator": "refrigerator",
+        "washing_machine": "washing_machine",
+    }
+    if not device_type:
+        return None
+    return mapping.get(str(device_type).strip().lower())
+
+
+def _associated_device_name(sensor_name: str, sensor_states: dict) -> str | None:
+    data = sensor_states.get(sensor_name, {}) if isinstance(sensor_states, dict) else {}
+    assoc = data.get("associated_device")
+    if isinstance(assoc, str) and assoc.strip():
+        return assoc.strip()
+
+    for s in sensors:
+        if isinstance(s, Sensor):
+            if s.name == sensor_name and getattr(s, "associated_device", None):
+                return str(s.associated_device).strip()
+        else:
+            if len(s) > 10 and s[0] == sensor_name and s[10] not in (None, "", "None"):
+                return str(s[10]).strip()
+
+    for s in read_sensors:
+        if isinstance(s, Sensor):
+            if s.name == sensor_name and getattr(s, "associated_device", None):
+                return str(s.associated_device).strip()
+        else:
+            if len(s) > 10 and s[0] == sensor_name and s[10] not in (None, "", "None"):
+                return str(s[10]).strip()
+
+    return None
+
+
+def _device_type_for_name(device_name: str | None) -> str | None:
+    if not device_name:
+        return None
+    for d in devices:
+        if isinstance(d, Device):
+            if d.name == device_name:
+                return d.type
+        else:
+            if len(d) > 3 and d[0] == device_name:
+                return d[3]
+
+    for d in read_devices:
+        if isinstance(d, Device):
+            if d.name == device_name:
+                return d.type
+        else:
+            if len(d) > 3 and d[0] == device_name:
+                return d[3]
+    return None
+
+
+def _llm_info_for_smartmeter(sensor_name: str, sensor_states: dict) -> dict:
+    profiles = _load_llm_profiles()
+    associated_device = _associated_device_name(sensor_name, sensor_states)
+    device_type = _device_type_for_name(associated_device)
+    appliance_key = _appliance_key_from_device_type(device_type)
+    if not appliance_key:
+        return {}
+    payload = profiles.get(appliance_key)
+    if isinstance(payload, dict):
+        out = dict(payload)
+        out.setdefault("source", "catalog")
+        return out
+
+    # Fallback for old runs where catalog file does not exist yet.
+    fallback_path = _discover_selected_case_csv(appliance_key)
+    if not os.path.isfile(fallback_path):
+        return {}
+    try:
+        row = pd.read_csv(fallback_path).iloc[0].to_dict()
+        dominant_cluster = None
+        dominant_cluster_n_cycles = None
+        try:
+            chosen_k_raw = row.get("chosen_k")
+            chosen_k = int(float(chosen_k_raw)) if chosen_k_raw not in (None, "") else None
+            base_dir = os.path.dirname(fallback_path)
+            if chosen_k is not None:
+                summary_path = os.path.join(base_dir, f"results_k{chosen_k}", "cluster_summary.csv")
+            else:
+                summary_path = os.path.join(base_dir, "cluster_summary.csv")
+            if os.path.isfile(summary_path):
+                summary_df = pd.read_csv(summary_path)
+                if not summary_df.empty and {"cluster", "n_cycles"}.issubset(set(summary_df.columns)):
+                    summary_df["cluster"] = pd.to_numeric(summary_df["cluster"], errors="coerce")
+                    summary_df["n_cycles"] = pd.to_numeric(summary_df["n_cycles"], errors="coerce")
+                    summary_df = summary_df.dropna(subset=["cluster", "n_cycles"])
+                    if not summary_df.empty:
+                        summary_df = summary_df.sort_values(["n_cycles", "cluster"], ascending=[False, True], kind="mergesort")
+                        dominant_cluster = int(summary_df.iloc[0]["cluster"])
+                        dominant_cluster_n_cycles = int(summary_df.iloc[0]["n_cycles"])
+        except Exception:
+            pass
+
+        return {
+            "appliance_key": appliance_key,
+            "chosen_k": row.get("chosen_k"),
+            "dominant_cluster": dominant_cluster,
+            "dominant_cluster_n_cycles": dominant_cluster_n_cycles,
+            "selected_cluster": row.get("cluster"),
+            "selected_cycle_id": row.get("cycle_id"),
+            "source": "selected_case_csv",
+        }
+    except Exception:
+        return {}
+
+
+def _draw_smartmeter_info_box(ax, info: dict):
+    if info:
+        lines = [
+            f"LLM source: {info.get('source', '?')}",
+            f"appliance: {info.get('appliance_key', '?')}",
+            f"k: {info.get('chosen_k', '?')}",
+            f"dominant cluster: {info.get('dominant_cluster', '?')} (n={info.get('dominant_cluster_n_cycles', '?')})",
+            f"selected cluster: {info.get('selected_cluster', '?')}",
+            f"selected cycle: {info.get('selected_cycle_id', '?')}",
+        ]
+    else:
+        lines = [
+            "LLM metadata not found",
+            "Run LLM Smart Meter once",
+            "or ensure selected_case CSV exists",
+        ]
+    ax.text(
+        0.015,
+        0.985,
+        "\n".join(lines),
+        transform=ax.transAxes,
+        va="top",
+        ha="left",
+        fontsize=9,
+        bbox={"boxstyle": "round,pad=0.3", "facecolor": "white", "alpha": 0.8, "edgecolor": "0.7"},
+    )
 
 def _parse_datetime(time_str: str) -> datetime:
     for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
@@ -228,9 +417,8 @@ def show_graphs(canvas, sensor_states):
             if gpio is not None:
                 df_real = dhtlogger.load_temp_by_gpio_any_csv(gpio, logs_dir="devices")
         elif sensor_type == "Smart Meter":
-            ip = _get_binding_ip(sensor)
-            if ip is not None:
-                df_real = smartmeter.load_power_by_ip_any_csv(ip, logs_dir="devices")
+            # Smart Meter "real" overlay is intentionally disabled.
+            df_real = pd.DataFrame()
         
         # Rebase real data to match simulated timeline
         if not df_real.empty and not df.empty:
@@ -278,7 +466,11 @@ def show_graphs(canvas, sensor_states):
             date_str = df_for_date.index[0].date() if not df_for_date.empty else ""
         except Exception:
             date_str = ""
-        ax.set_title(f"{sensor} - {date_str}")
+        title = f"{sensor} - {date_str}"
+        if sensor_type == "Smart Meter":
+            info = _llm_info_for_smartmeter(sensor, sensor_states)
+            _draw_smartmeter_info_box(ax, info)
+        ax.set_title(title)
         ax.set_xlabel("Time")
         ax.set_ylabel(y_label)
 
@@ -391,9 +583,8 @@ def show_graphs_auto(sensor_states, selected_keys, target_frame):
             if gpio is not None:
                 df_real = dhtlogger.load_temp_by_gpio_any_csv(gpio, logs_dir="devices")
         elif sensor_type == "Smart Meter":
-            ip = _get_binding_ip(sensor)
-            if ip is not None:
-                df_real = smartmeter.load_power_by_ip_any_csv(ip, logs_dir="devices")
+            # Smart Meter "real" overlay is intentionally disabled.
+            df_real = pd.DataFrame()
         
         # Rebase real data to match simulated timeline
         if not df_real.empty and not df.empty:
@@ -435,7 +626,11 @@ def show_graphs_auto(sensor_states, selected_keys, target_frame):
             if not df_real.empty:
                 ax.plot(df_real.index, df_real["value"], linestyle='--', linewidth=1.5, label=f"{sensor} (real)", color='orange')
 
-        ax.set_title(f"Sensor trend: {sensor}")
+        title = f"Sensor trend: {sensor}"
+        if sensor_type == "Smart Meter":
+            info = _llm_info_for_smartmeter(sensor, sensor_states)
+            _draw_smartmeter_info_box(ax, info)
+        ax.set_title(title)
         ax.set_xlabel("Time")
         ax.set_ylabel(y_label)
 
