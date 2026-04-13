@@ -11,6 +11,9 @@ from read import read_sensors as sensors_file
 from read import read_devices as devices_file
 import os, json
 import math
+import pickle
+from pathlib import Path
+from bisect import bisect_right
 from dhtlogger import load_temp_by_label_any_csv, load_temp_by_gpio_any_csv
 import pandas as pd
 from collections import deque
@@ -20,6 +23,12 @@ from models import Sensor, Device
 TEMP_RECENT: dict[str, deque] = {}
 TEMP_GREEN_UNTIL: dict[str, float] = {}
 TEMP_BASELINE: dict[str, float] = {}
+
+LLM_PROFILE_CATALOG_PATH = Path("llm_smartmeter_profiles.json")
+LLM_PROFILE_CATALOG_CACHE: Optional[dict] = None
+LLM_PROFILE_CATALOG_MTIME: Optional[float] = None
+LLM_CYCLE_CURVE_CACHE: dict[tuple[str, int], Optional[tuple[list[float], list[float]]]] = {}
+LLM_SENSOR_ON_START: dict[str, datetime] = {}
 
 sensors = []
 add_point_enabled = False
@@ -647,189 +656,164 @@ def changeTemperature(canvas, sensor, sensors, heating_factor, delta_seconds, cu
     return name, new_state, updated
 
 
-def _get_intraday_power_pattern(device_id: str, time_of_day_minutes: float, window_days: int = 7) -> Optional[float]:
-    """
-    Use smart meter history to find the intraday consumption pattern.
-
-    Looks across previous days for typical consumption at this time of day,
-    and returns a weighted average (more recent = higher weight).
-
-    Args:
-        device_id: smart meter device_id stored in CSV
-        time_of_day_minutes: minutes since midnight (0-1440)
-        window_days: how many previous days to analyze
-
-    Returns:
-        predicted power in W or None if no data is available
-    """
-    try:
-        import smartmeter
-    except ImportError:
+def _device_type_to_appliance_key(dev_type: Optional[str]) -> Optional[str]:
+    mapping = {
+        "computer": "computer",
+        "coffee_machine": "coffee_machine",
+        "dishwasher": "dishwasher",
+        "refrigerator": "refrigerator",
+        "washing_machine": "washing_machine",
+    }
+    if not dev_type:
         return None
-    
-    # Load historical data
-    df = None
+    return mapping.get(str(dev_type).strip().lower())
+
+
+def _load_llm_profile_catalog() -> dict:
+    global LLM_PROFILE_CATALOG_CACHE, LLM_PROFILE_CATALOG_MTIME
     try:
-        df = smartmeter.load_power_by_device_id_any_csv(device_id, logs_dir="devices")
+        if not LLM_PROFILE_CATALOG_PATH.exists():
+            LLM_PROFILE_CATALOG_CACHE = {}
+            LLM_PROFILE_CATALOG_MTIME = None
+            return {}
+
+        mtime = float(LLM_PROFILE_CATALOG_PATH.stat().st_mtime)
+        if LLM_PROFILE_CATALOG_CACHE is not None and LLM_PROFILE_CATALOG_MTIME == mtime:
+            return LLM_PROFILE_CATALOG_CACHE
+
+        data = json.loads(LLM_PROFILE_CATALOG_PATH.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            data = {}
+        LLM_PROFILE_CATALOG_CACHE = data
+        LLM_PROFILE_CATALOG_MTIME = mtime
+        return data
     except Exception:
-        pass
-    
-    if df is None or df.empty or "value" not in df.columns:
-        return None
-    
-    df = df.dropna(subset=["value"])
-    if df.empty:
-        return None
-    
-    # Add hour-of-day (minutes since midnight) and day columns
-    if not isinstance(df.index, pd.DatetimeIndex):
-        return None
-    
-    df_copy = df.copy()
-    df_copy["hour_of_day"] = (df_copy.index.hour * 60 + df_copy.index.minute).astype(float)
-    df_copy["day"] = df_copy.index.date
-    
-    # Find similar values (within ±30 minutes)
-    tolerance_min = 30
-    candidates = df_copy[
-        (df_copy["hour_of_day"] >= time_of_day_minutes - tolerance_min) &
-        (df_copy["hour_of_day"] <= time_of_day_minutes + tolerance_min)
-    ]
-    
-    if candidates.empty:
-        return None
-    
-    # Weighted average (more recent days have higher weight)
-    unique_days = candidates["day"].unique()
-    if len(unique_days) > window_days:
-        unique_days = unique_days[-window_days:]
-    
-    weighted_sum = 0.0
-    weight_total = 0.0
-    
-    for idx, day in enumerate(unique_days):
-        day_data = candidates[candidates["day"] == day]["value"]
-        if not day_data.empty:
-            day_mean = float(day_data.mean())
-            # Weight: more recent days have higher weight (exponential)
-            weight = 2.0 ** (idx - len(unique_days) + 1)
-            weighted_sum += day_mean * weight
-            weight_total += weight
-    
-    if weight_total > 0:
-        return weighted_sum / weight_total
-    
-    return None
+        return {}
 
 
-def get_replay_smart_meter_consumption(device_id: str, current_datetime: Optional[datetime] = None) -> Optional[float]:
-    """
-    Smart meter consumption replay based on historical data, aligned to real time.
-
-    Logic:
-    - If current_datetime matches a time in the CSV -> direct lookup (with interpolation)
-    - If current_datetime is outside the CSV range:
-      - Before: use first value
-      - After: use intraday pattern prediction
-    
-    Args:
-        device_id: smart meter device_id stored in CSV
-        current_datetime: current datetime to look up
-    
-    Returns:
-        Power consumption in W or None if no data is available
-    """
-    # Handle None or missing datetime -> fallback to model-only
-    if current_datetime is None:
-        return None
-    
+def _load_llm_cycle_curve(profile: dict) -> Optional[tuple[list[float], list[float]]]:
+    """Load selected cycle (minutes, power_W) from LLM runtime pkl by cycle_id."""
     try:
-        import smartmeter
-    except ImportError:
-        return None
-    
-    try:
-        df = smartmeter.load_power_by_device_id_any_csv(device_id, logs_dir="devices")
+        appliance_key = str(profile.get("appliance_key") or "").strip()
+        cycle_id = int(profile.get("selected_cycle_id"))
+        pkl_path = Path(str(profile.get("pkl_path") or "").strip())
     except Exception:
         return None
-    
-    if df is None or df.empty or "value" not in df.columns:
-        return None
-    
-    df_sorted = df.sort_index()
-    if df_sorted.empty:
-        return None
-    
-    # Get datetimes from index
-    datetimes = df_sorted.index.to_list()
-    values = df_sorted["value"].astype(float).to_list()
-    
-    # Convert to timezone-naive for comparison
-    current_dt = current_datetime
-    if current_dt.tzinfo is not None:
-        current_dt = current_dt.replace(tzinfo=None)
-    
-    # Before first: use first value
-    if current_dt <= datetimes[0]:
-        return float(values[0])
-    
-    # After last: use intraday pattern prediction
-    if current_dt >= datetimes[-1]:
-        time_of_day = (current_dt.hour * 60 + current_dt.minute)
-        predicted = _get_intraday_power_pattern(device_id, time_of_day)
-        if predicted is not None:
-            return float(predicted)
-        
-        # Fallback: use last known value
-        return float(values[-1])
-    
-    # Within available range: interpolate
-    for i in range(len(datetimes) - 1):
-        dt1, dt2 = datetimes[i], datetimes[i + 1]
-        if dt1 <= current_dt <= dt2:
-            v1, v2 = values[i], values[i + 1]
-            
-            # Handle zero duration (same timestamp)
-            if dt2 == dt1:
-                return float(v1)
-            
-            # Linear interpolation
-            time_diff = (dt2 - dt1).total_seconds()
-            time_into_interval = (current_dt - dt1).total_seconds()
-            alpha = time_into_interval / time_diff
-            return float(v1 + alpha * (v2 - v1))
-    
-    # Should not reach here if logic is sound, but return last value as fallback
-    return float(values[-1])
 
+    cache_key = (appliance_key, cycle_id)
+    if cache_key in LLM_CYCLE_CURVE_CACHE:
+        return LLM_CYCLE_CURVE_CACHE[cache_key]
 
-def _has_real_smart_meter_data(device_id: str) -> bool:
-    """Return True if historical smart meter CSV data exists for this device_id."""
-    if not device_id:
-        return False
-    try:
-        import smartmeter
-    except ImportError:
-        return False
+    if not pkl_path.is_file():
+        LLM_CYCLE_CURVE_CACHE[cache_key] = None
+        return None
 
     try:
-        df = smartmeter.load_power_by_device_id_any_csv(device_id, logs_dir="devices")
+        with open(pkl_path, "rb") as fp:
+            cycles = pickle.load(fp)
     except Exception:
-        return False
+        LLM_CYCLE_CURVE_CACHE[cache_key] = None
+        return None
 
-    if df is None or df.empty or "value" not in df.columns:
-        return False
+    if not isinstance(cycles, list):
+        LLM_CYCLE_CURVE_CACHE[cache_key] = None
+        return None
 
-    return not df.dropna(subset=["value"]).empty
+    selected = None
+    for c in cycles:
+        try:
+            if int(c.get("cycle_id")) == cycle_id:
+                selected = c
+                break
+        except Exception:
+            continue
+
+    if not selected:
+        LLM_CYCLE_CURVE_CACHE[cache_key] = None
+        return None
+
+    df = pd.DataFrame(selected.get("data") or [])
+    if df.empty or "time" not in df.columns or "value" not in df.columns:
+        LLM_CYCLE_CURVE_CACHE[cache_key] = None
+        return None
+
+    df["time"] = pd.to_datetime(df["time"], errors="coerce")
+    df["value"] = pd.to_numeric(df["value"], errors="coerce")
+    df = df.dropna(subset=["time", "value"]).sort_values("time").reset_index(drop=True)
+    if len(df) < 2:
+        LLM_CYCLE_CURVE_CACHE[cache_key] = None
+        return None
+
+    t_min = (df["time"] - df["time"].iloc[0]).dt.total_seconds().to_numpy(dtype=float) / 60.0
+    vals = df["value"].to_numpy(dtype=float)
+    if len(t_min) < 2 or float(t_min[-1]) <= 0.0:
+        LLM_CYCLE_CURVE_CACHE[cache_key] = None
+        return None
+
+    out = (t_min.tolist(), vals.tolist())
+    LLM_CYCLE_CURVE_CACHE[cache_key] = out
+    return out
 
 
-def _is_smart_meter_bound_to_real_ip(sensor_name: str) -> bool:
-    """Real mode is enabled only for Smart Meter sensors explicitly bound to an IP."""
-    if not sensor_name:
-        return False
-    mapping = _load_sensor_map()
-    cfg = mapping.get(sensor_name, {}) if isinstance(mapping, dict) else {}
-    return isinstance(cfg, dict) and cfg.get("by") == "ip" and bool(str(cfg.get("value") or "").strip())
+def _interp_cycle_value(minutes_axis: list[float], values_axis: list[float], elapsed_min: float) -> float:
+    if not minutes_axis or not values_axis:
+        return 0.0
+    if len(minutes_axis) == 1:
+        return max(0.0, float(values_axis[0]))
+
+    total = float(minutes_axis[-1])
+    if total <= 0.0:
+        return max(0.0, float(values_axis[-1]))
+
+    x = float(elapsed_min) % total
+    i = bisect_right(minutes_axis, x)
+    if i <= 0:
+        return max(0.0, float(values_axis[0]))
+    if i >= len(minutes_axis):
+        return max(0.0, float(values_axis[-1]))
+
+    x0 = float(minutes_axis[i - 1])
+    x1 = float(minutes_axis[i])
+    y0 = float(values_axis[i - 1])
+    y1 = float(values_axis[i])
+    if x1 <= x0:
+        return max(0.0, y0)
+    alpha = (x - x0) / (x1 - x0)
+    return max(0.0, y0 + alpha * (y1 - y0))
+
+
+def _get_llm_smartmeter_consumption(
+    sensor_name: str,
+    dev_type: Optional[str],
+    dev_state: int,
+    current_datetime: Optional[datetime],
+) -> Optional[float]:
+    appliance_key = _device_type_to_appliance_key(dev_type)
+    if not appliance_key:
+        return None
+
+    catalog = _load_llm_profile_catalog()
+    profile = catalog.get(appliance_key) if isinstance(catalog, dict) else None
+    if not isinstance(profile, dict):
+        return None
+
+    if dev_state != 1:
+        LLM_SENSOR_ON_START.pop(sensor_name, None)
+        return 0.0
+
+    start_dt = LLM_SENSOR_ON_START.get(sensor_name)
+    now_dt = current_datetime or datetime.now()
+    if start_dt is None:
+        LLM_SENSOR_ON_START[sensor_name] = now_dt
+        start_dt = now_dt
+
+    curve = _load_llm_cycle_curve(profile)
+    if not curve:
+        return None
+
+    elapsed_min = max(0.0, (now_dt - start_dt).total_seconds() / 60.0)
+    minutes_axis, values_axis = curve
+    return _interp_cycle_value(minutes_axis, values_axis, elapsed_min)
 
 
 def _find_associated_device(dev_list, wanted_name):
@@ -843,33 +827,6 @@ def _find_associated_device(dev_list, wanted_name):
         ),
         None,
     )
-
-
-def _mean_power_for_smart_meter(device_id: str, min_power_w: float = 0.0) -> Optional[float]:
-    if not device_id:
-        return None
-    try:
-        import smartmeter
-    except ImportError:
-        return None
-
-    try:
-        df = smartmeter.load_power_by_device_id_any_csv(device_id, logs_dir="devices")
-    except Exception:
-        return None
-
-    if df is None or df.empty or "value" not in df.columns:
-        return None
-
-    values = df["value"].dropna()
-    values = values[values > max(0.0, float(min_power_w))]
-    if values.empty:
-        return None
-
-    try:
-        return float(values.mean())
-    except Exception:
-        return None
 
 
 def changeSmartMeter(canvas, sensor, sensors, devices, delta_seconds, current_datetime):
@@ -921,39 +878,17 @@ def changeSmartMeter(canvas, sensor, sensors, devices, delta_seconds, current_da
             else:
                 dev_name, _, _, dev_type, _, dev_state, *_ = associated_dev
 
-        has_real_data = _is_smart_meter_bound_to_real_ip(name) and _has_real_smart_meter_data(name)
-
-        # Special rule for PC smart meter:
-        # - if real data exists, use mean power (+ small noise) only when PC is ON
-        # - if OFF, force 0
-        if dev_type == "Computer" and has_real_data:
+        llm_consumption = _get_llm_smartmeter_consumption(name, dev_type, int(dev_state), current_datetime)
+        if llm_consumption is not None:
+            new_consumption = max(0.0, float(llm_consumption))
+        elif dev_name is not None and dev_type is not None:
+            # Fallback only if no LLM profile exists for this appliance type.
             if dev_state == 1:
-                mean_power = _mean_power_for_smart_meter(name, min_power_w=10.0)
-                if mean_power is not None:
-                    import random
-                    std = max(1.0, abs(mean_power) * 0.03)
-                    new_consumption = max(0.0, float(random.gauss(mean_power, std)))
-                else:
-                    new_consumption = 0.0
+                new_consumption = get_device_consumption(
+                    dev_name, dev_type, current_datetime, active_cycles, dev_state
+                )
             else:
                 new_consumption = 0.0
-        # If this device has real CSV data, follow ONLY real data.
-        elif has_real_data:
-            replay_dt = current_datetime or datetime.now()
-            replay_consumption = get_replay_smart_meter_consumption(name, replay_dt)
-            if replay_consumption is not None:
-                new_consumption = max(0.0, float(replay_consumption))
-            else:
-                new_consumption = 0.0
-        else:
-            # No real CSV: use ONLY predefined/device model.
-            if dev_name is not None and dev_type is not None:
-                if dev_state == 1:
-                    new_consumption = get_device_consumption(
-                        dev_name, dev_type, current_datetime, active_cycles, dev_state
-                    )
-                else:
-                    new_consumption = 0.0
 
     # update the sensor array with new consumption
     updated = []

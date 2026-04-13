@@ -78,6 +78,17 @@ def get_simulation_datetime(timer_app_instance):
 def interaction(canvas, timer_app_instance, event, load_active, activity_label):
     global avatar_id, active_pir_sensors
 
+    x = canvas.canvasx(event.x)
+    y = canvas.canvasy(event.y)
+
+    if avatar_image is None:
+        initialize_avatar_image()
+
+    # Keep avatar visible even when the simulation is paused/stopped.
+    if avatar_id is not None:
+        canvas.delete(avatar_id)
+    avatar_id = canvas.create_image(x, y, image=avatar_image)
+
     if not timer_app_instance.is_running:
         print("Error: Simulation not started. Press 'Start Simulation' before interact.")
         return
@@ -86,9 +97,6 @@ def interaction(canvas, timer_app_instance, event, load_active, activity_label):
     current_date = timer_app_instance.current_date
     timestamp = f"{current_date} {simulated_time}"
     print(f"Time of pressure: {simulated_time} - Date: {current_date}")
-
-    x = canvas.canvasx(event.x)
-    y = canvas.canvasy(event.y)
 
     log_move(timestamp, int(x), int(y))
 
@@ -105,11 +113,6 @@ def interaction(canvas, timer_app_instance, event, load_active, activity_label):
         walls = walls_coordinates
         d_devices = devices
         d_doors = doors
-
-    # Move the avatar
-    if avatar_id is not None:
-        canvas.delete(avatar_id)
-    avatar_id = canvas.create_image(x, y, image=avatar_image)
 
     if not s_sensors:
         print("No sensors exists.")

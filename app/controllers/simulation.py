@@ -52,9 +52,16 @@ def start_sim(ctx: AppContext):
     if hasattr(ctx, 'canvas') and ctx.canvas is not None:
         ctx.canvas.unbind("<Button-1>")
 
+    def _bind_canvas_click():
+        ctx.canvas.bind(
+            "<Button-1>",
+            lambda event: interaction(ctx.canvas, timer_app_instance, event, ctx.load_active, ctx.activity_label),
+        )
+
     timer_app_instance = TimerApp(
         ctx.timer_frame,
         start_callback=lambda: (
+            _bind_canvas_click(),
             start_simulation(ctx.canvas, timer_app_instance, ctx.load_active, ctx.activity_label),
             monitor_activities(ctx.canvas, ctx.load_active, ctx.activity_label, timer_app_instance),
             start_interaction_log_session(timer_app_instance.get_simulated_time()),
@@ -63,16 +70,12 @@ def start_sim(ctx: AppContext):
             stop_simulation(timer_app_instance),
             close_current_activity(timer_app_instance, ctx.activity_label),
             stop_interaction_log_session(),
-            ctx.canvas.unbind("<Button-1>"),
             enable_all_menus(ctx),
             ctx.window.after(100, lambda: _cleanup_manual_sim(ctx)),
         ),
     )
 
-    ctx.canvas.bind(
-        "<Button-1>",
-        lambda event: interaction(ctx.canvas, timer_app_instance, event, ctx.load_active, ctx.activity_label),
-    )
+    _bind_canvas_click()
     
     ctx.timer_app_instance = timer_app_instance
 

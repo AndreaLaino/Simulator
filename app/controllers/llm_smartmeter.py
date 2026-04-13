@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import importlib.util
+import json
 import math
 import re
 import sys
@@ -54,10 +55,51 @@ APPLIANCE_OPTIONS = {
 @dataclass
 class LlmRunResult:
     chosen_k: int
+    appliance_key: str
+    selected_cycle_id: int
+    dominant_cluster: int
+    dominant_cluster_n_cycles: int
     selected_cluster: int
     output_dir: Path
     cases_eval_csv: Path
     selected_case_csv: Path
+
+
+def _upsert_runtime_profile(
+    appliance_key: str,
+    output_dir: Path,
+    chosen_k: int,
+    dominant_cluster: int,
+    dominant_cluster_n_cycles: int,
+    selected_cluster: int,
+    selected_cycle_id: int,
+) -> Path:
+    """Persist the latest LLM selection so runtime smart meters can replay it."""
+    catalog_path = BASE_DIR / "llm_smartmeter_profiles.json"
+    payload = {
+        "appliance_key": appliance_key,
+        "output_dir": str(output_dir),
+        "chosen_k": int(chosen_k),
+        "dominant_cluster": int(dominant_cluster),
+        "dominant_cluster_n_cycles": int(dominant_cluster_n_cycles),
+        "selected_cluster": int(selected_cluster),
+        "selected_cycle_id": int(selected_cycle_id),
+        "pkl_path": str(output_dir / "llm_runtime_cycles.pkl"),
+        "updated_at": pd.Timestamp.now().isoformat(),
+    }
+
+    existing: dict = {}
+    if catalog_path.exists():
+        try:
+            existing = json.loads(catalog_path.read_text(encoding="utf-8"))
+            if not isinstance(existing, dict):
+                existing = {}
+        except Exception:
+            existing = {}
+
+    existing[appliance_key] = payload
+    catalog_path.write_text(json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8")
+    return catalog_path
 
 
 def _load_module_from_file(module_name: str, module_path: Path):
@@ -275,32 +317,83 @@ def _run_llm_pipeline(
 
     cases_dir = output_dir / f"results_k{chosen_k}"
     rep_path = cases_dir / "cluster_representatives.csv"
+    clusters_path = cases_dir / "clusters.csv"
+    summary_path = cases_dir / "cluster_summary.csv"
     if not rep_path.exists():
         raise FileNotFoundError(f"Cases file not found for chosen k: {rep_path}")
+    if not clusters_path.exists():
+        raise FileNotFoundError(f"Clusters file not found for chosen k: {clusters_path}")
+    if not summary_path.exists():
+        raise FileNotFoundError(f"Cluster summary file not found for chosen k: {summary_path}")
 
     rep_df = pd.read_csv(rep_path)
     if rep_df.empty:
         raise RuntimeError("No generated cases found in cluster_representatives.csv.")
 
+    clusters_df = pd.read_csv(clusters_path)
+    if clusters_df.empty:
+        raise RuntimeError("No generated cycles found in clusters.csv.")
+
+    summary_df = pd.read_csv(summary_path)
+    if summary_df.empty or "cluster" not in summary_df.columns or "n_cycles" not in summary_df.columns:
+        raise RuntimeError("Invalid or empty cluster_summary.csv for chosen k.")
+
+    summary_df["cluster"] = pd.to_numeric(summary_df["cluster"], errors="coerce")
+    summary_df["n_cycles"] = pd.to_numeric(summary_df["n_cycles"], errors="coerce")
+    summary_df = summary_df.dropna(subset=["cluster", "n_cycles"])
+    if summary_df.empty:
+        raise RuntimeError("cluster_summary.csv has no valid cluster sizes.")
+
+    summary_df = summary_df.sort_values(["n_cycles", "cluster"], ascending=[False, True], kind="mergesort")
+    dominant_cluster = int(summary_df.iloc[0]["cluster"])
+    dominant_cluster_n_cycles = int(summary_df.iloc[0]["n_cycles"])
+
     partial_df = _get_last_incomplete_day(df)
     partial_features = _feature_vector(partial_df)
 
-    ranked = _compute_case_distances(rep_df, partial_features)
+    ranked = _compute_case_distances(clusters_df, partial_features)
     ranked.insert(0, "chosen_k", chosen_k)
+    ranked.insert(1, "dominant_cluster", dominant_cluster)
+    ranked.insert(2, "dominant_cluster_n_cycles", dominant_cluster_n_cycles)
     for feat_name, feat_value in partial_features.items():
         ranked[f"last_day_{feat_name}"] = float(feat_value)
 
     cases_eval_csv = output_dir / f"cases_evaluation_k{chosen_k}.csv"
     ranked.to_csv(cases_eval_csv, index=False)
 
-    best = ranked.iloc[[0]].copy()
+    dominant_ranked = ranked[ranked["cluster"] == dominant_cluster].reset_index(drop=True)
+    best = dominant_ranked.iloc[[0]].copy() if not dominant_ranked.empty else ranked.iloc[[0]].copy()
     selected_case_csv = output_dir / "selected_case_latest_incomplete_day.csv"
     best.to_csv(selected_case_csv, index=False)
 
     selected_cluster = int(best.iloc[0]["cluster"])
+    selected_cycle_id = int(best.iloc[0]["cycle_id"])
+
+    catalog_path = _upsert_runtime_profile(
+        appliance_key=appliance_key,
+        output_dir=output_dir,
+        chosen_k=chosen_k,
+        dominant_cluster=dominant_cluster,
+        dominant_cluster_n_cycles=dominant_cluster_n_cycles,
+        selected_cluster=selected_cluster,
+        selected_cycle_id=selected_cycle_id,
+    )
+    logger.info(
+        "[LLM SmartMeter] profile updated for %s (k=%s, dominant_cluster=%s, selected_cluster=%s, cycle_id=%s) -> %s",
+        appliance_key,
+        chosen_k,
+        dominant_cluster,
+        selected_cluster,
+        selected_cycle_id,
+        catalog_path,
+    )
 
     return LlmRunResult(
         chosen_k=chosen_k,
+        appliance_key=appliance_key,
+        selected_cycle_id=selected_cycle_id,
+        dominant_cluster=dominant_cluster,
+        dominant_cluster_n_cycles=dominant_cluster_n_cycles,
         selected_cluster=selected_cluster,
         output_dir=output_dir,
         cases_eval_csv=cases_eval_csv,
@@ -434,8 +527,11 @@ def open_llm_smartmeter_ui(ctx: AppContext):
                 messagebox.showinfo(
                     "LLM Smart Meter",
                     "Completed.\n"
+                    f"Appliance: {result.appliance_key}\n"
                     f"Chosen k: {result.chosen_k}\n"
+                    f"Dominant cluster: {result.dominant_cluster} (n={result.dominant_cluster_n_cycles})\n"
                     f"Selected cluster: {result.selected_cluster}\n\n"
+                    f"Selected cycle id: {result.selected_cycle_id}\n\n"
                     f"Cases CSV: {result.cases_eval_csv}\n"
                     f"Selected case CSV: {result.selected_case_csv}",
                 )
