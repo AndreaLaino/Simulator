@@ -16,7 +16,7 @@ from read import (
 from app.context import AppContext
 from app.logging_setup import setup_logging
 from app.save_paths import ensure_houses_dir, ensure_saves_dir, ensure_devices_dir
-from models import Point, Sensor, Device, Door
+from models import Point, Sensor, Device, Door, Wall
 
 
 def _ask_overwrite_or_append(parent, dest_path: str) -> str:
@@ -48,35 +48,35 @@ def _ask_overwrite_or_append(parent, dest_path: str) -> str:
 logger = setup_logging("io.scenario")
 
 
-def _point_to_tuple(p: Point | tuple) -> tuple:
-    if isinstance(p, Point):
-        return (p.name, p.x, p.y)
-    return p
+def _point_to_tuple(p: Point) -> tuple:
+    return (p.name, p.x, p.y)
 
 
-def _sensor_to_tuple(s: Sensor | tuple) -> tuple:
-    if isinstance(s, Sensor):
-        return (
-            s.name, s.x, s.y, s.type, s.min_val, s.max_val, s.step, s.state,
-            s.direction, s.consumption, s.associated_device
-        )
-    return s
+def _sensor_to_tuple(s: Sensor) -> tuple:
+    return (
+        s.name, s.x, s.y, s.type, s.min_val, s.max_val, s.step, s.state,
+        s.direction, s.consumption, s.associated_device
+    )
 
 
-def _device_to_tuple(d: Device | tuple) -> tuple:
-    if isinstance(d, Device):
-        return (
-            d.name, d.x, d.y, d.type, d.power, d.state,
-            d.min_consumption, d.max_consumption, d.current_consumption,
-            d.consumption_direction
-        )
-    return d
+def _device_to_tuple(d: Device) -> tuple:
+    return (
+        d.name, d.x, d.y, d.type, d.power, d.state,
+        d.min_consumption, d.max_consumption, d.current_consumption,
+        d.consumption_direction
+    )
 
 
-def _door_to_tuple(d: Door | tuple) -> tuple:
-    if isinstance(d, Door):
-        return (d.x1, d.y1, d.x2, d.y2, d.state)
-    return d
+def _door_to_tuple(d: Door) -> tuple:
+    return (d.x1, d.y1, d.x2, d.y2, d.state)
+
+
+def _wall_to_point_names(wall: Wall, points_source: list[Point]) -> tuple[str, str] | None:
+    point_a = next((p for p in points_source if p.x == wall.x1 and p.y == wall.y1), None)
+    point_b = next((p for p in points_source if p.x == wall.x2 and p.y == wall.y2), None)
+    if point_a is None or point_b is None:
+        return None
+    return point_a.name, point_b.name
 
 
 def merge_smartmeter_files(logs_dir: str = "logs") -> bool:
@@ -309,13 +309,12 @@ def _write_scenario(ctx: AppContext, filename: str) -> None:
         # Walls
         csvwriter.writerow([])
         csvwriter.writerow(["Walls"])
-        if not ctx.load_active:
-            for i in range(0, len(walls), 2):
-                if i + 1 < len(walls):
-                    csvwriter.writerow([walls[i], walls[i + 1]])
-        else:
-            for p1, p2 in ctx.read_walls:
-                csvwriter.writerow([p1, p2])
+        wall_source = walls if not ctx.load_active else ctx.read_walls
+        point_source = points if not ctx.load_active else ctx.r_points
+        for wall in wall_source:
+            names = _wall_to_point_names(wall, point_source)
+            if names is not None:
+                csvwriter.writerow([names[0], names[1]])
 
         # Sensors
         csvwriter.writerow([])

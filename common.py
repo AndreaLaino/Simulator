@@ -15,11 +15,7 @@ def update_sensor_states(name, state, sensor_states, timestamp):
 
 # this function is not in the sensor.py file to avoid cyclic import
 def changeSwitch(canvas, sensor, sensors, door_state):
-    if len(sensor) != 11:
-        print(f"Error: unexpected switch sensor structure {sensor}")
-        return None, None, sensors
-
-    name, x, y, type, min_val, max_val, step, state, direction, consumption, associated_device = sensor
+    name, x, y, type, min_val = sensor.name, sensor.x, sensor.y, sensor.type, sensor.min_val
 
     try:
         numeric_state = float(door_state)
@@ -36,13 +32,7 @@ def changeSwitch(canvas, sensor, sensors, door_state):
 
     new_state = numeric_state
 
-    updated_sensors = []
-    for s in sensors:
-        if s == sensor:
-            updated_sensor = (name, x, y, type, min_val, max_val, step, new_state, direction, consumption, associated_device)
-            updated_sensors.append(updated_sensor)
-        else:
-            updated_sensors.append(s)
+    sensor.state = new_state
 
     update_sensor_color(canvas, name, new_state, float(min_val))
-    return name, new_state, updated_sensors
+    return name, new_state, sensors

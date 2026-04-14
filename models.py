@@ -1,8 +1,4 @@
-"""
-Models for the Home Simulator.
-
-This module defines the core data classes to replace tuple-based data structures.
-"""
+"""Models for the Home Simulator."""
 
 from typing import Optional, List
 from dataclasses import dataclass, field
@@ -14,15 +10,6 @@ class Point:
     name: str
     x: int
     y: int
-
-    def tuple(self) -> tuple:
-        """Return tuple representation for backward compatibility."""
-        return (self.name, self.x, self.y)
-
-    @staticmethod
-    def from_tuple(t: tuple) -> 'Point':
-        """Create Point from tuple (name, x, y)."""
-        return Point(name=t[0], x=t[1], y=t[2])
 
 
 @dataclass
@@ -40,25 +27,6 @@ class Sensor:
     consumption: Optional[float] = None  # for Smart Meter
     associated_device: Optional[str] = None  # device linked to this sensor
 
-    def tuple(self) -> tuple:
-        """Return tuple representation for backward compatibility."""
-        return (
-            self.name, self.x, self.y, self.type,
-            self.min_val, self.max_val, self.step, self.state,
-            self.direction, self.consumption, self.associated_device
-        )
-
-    @staticmethod
-    def from_tuple(t: tuple) -> 'Sensor':
-        """Create Sensor from tuple (name, x, y, type, min_val, max_val, step, state, direction, consumption, associated_device)."""
-        return Sensor(
-            name=t[0], x=t[1], y=t[2], type=t[3],
-            min_val=t[4], max_val=t[5], step=t[6], state=t[7],
-            direction=t[8] if len(t) > 8 else None,
-            consumption=t[9] if len(t) > 9 else None,
-            associated_device=t[10] if len(t) > 10 else None
-        )
-
 
 @dataclass
 class Device:
@@ -73,24 +41,6 @@ class Device:
     max_consumption: float
     current_consumption: float = 0.0
     consumption_direction: int = 1  # 1 = increasing, -1 = decreasing
-
-    def tuple(self) -> tuple:
-        """Return tuple representation for backward compatibility."""
-        return (
-            self.name, self.x, self.y, self.type, self.power,
-            self.state, self.min_consumption, self.max_consumption,
-            self.current_consumption, self.consumption_direction
-        )
-
-    @staticmethod
-    def from_tuple(t: tuple) -> 'Device':
-        """Create Device from tuple (name, x, y, type, power, state, min_consumption, max_consumption, current_consumption, direction)."""
-        return Device(
-            name=t[0], x=t[1], y=t[2], type=t[3], power=t[4],
-            state=t[5], min_consumption=t[6], max_consumption=t[7],
-            current_consumption=t[8] if len(t) > 8 else 0.0,
-            consumption_direction=t[9] if len(t) > 9 else 1
-        )
 
     def is_on(self) -> bool:
         """Check if device is ON."""
@@ -110,15 +60,6 @@ class Door:
     y2: int
     state: str = "open"  # "open" or "close"
 
-    def tuple(self) -> tuple:
-        """Return tuple representation for backward compatibility."""
-        return (self.x1, self.y1, self.x2, self.y2, self.state)
-
-    @staticmethod
-    def from_tuple(t: tuple) -> 'Door':
-        """Create Door from tuple (x1, y1, x2, y2, state)."""
-        return Door(x1=t[0], y1=t[1], x2=t[2], y2=t[3], state=t[4] if len(t) > 4 else "open")
-
     def is_closed(self) -> bool:
         """Check if door is closed."""
         return self.state == "close"
@@ -136,15 +77,6 @@ class Wall:
     x2: int
     y2: int
     doors: List[Door] = field(default_factory=list)
-
-    def tuple(self) -> tuple:
-        """Return tuple representation for backward compatibility."""
-        return (self.x1, self.y1, self.x2, self.y2)
-
-    @staticmethod
-    def from_tuple(t: tuple) -> 'Wall':
-        """Create Wall from tuple (x1, y1, x2, y2)."""
-        return Wall(x1=t[0], y1=t[1], x2=t[2], y2=t[3])
 
     def add_door(self, door: Door):
         """Add a door to this wall."""

@@ -5,7 +5,12 @@ import os
 from datetime import datetime
 from read import read_sensors
 from sensor import sensors
-from app.save_paths import create_new_save_session, ensure_saves_dir, get_or_create_current_save_session
+from app.save_paths import (
+    create_new_save_session,
+    ensure_saves_dir,
+    get_or_create_current_save_session,
+    get_session_subdir,
+)
 
 activity_log = []  # list of dictionaries: {"activity": . "start": . "end": .}
 active_activities = {}  # dict: {"cooking": "00:05", "laundry": "00:06"}
@@ -71,7 +76,8 @@ def show_activity_log():
 
     def save():
         session_dir = get_or_create_current_save_session(suffix="logs")
-        file_path = session_dir / "activity_log.csv"
+        activity_dir = get_session_subdir("activities", session_dir)
+        file_path = activity_dir / "activity_log.csv"
         save_activity_log(str(file_path))
         messagebox.showinfo("Success", f"Activity log saved in:\n{file_path}")
 
@@ -96,11 +102,8 @@ def show_log(canvas, sensor_states, load_active):
         # Build a short (type, subject, name) descriptor for the selected sensor.
         sensors_src = read_sensors if load_active else sensors
         for s in sensors_src:
-            try:
-                if s[0] == sensor_name:
-                    return s[3], s[1], s[2]
-            except Exception:
-                continue
+            if s.name == sensor_name:
+                return s.type, s.x, s.y
         return "UNKNOWN", 0, 0
 
     # Create a new tab with a table for the selected sensor and populate it from CSV.
@@ -183,6 +186,7 @@ def show_log(canvas, sensor_states, load_active):
             return
 
         session_dir = get_or_create_current_save_session(suffix="logs")
+        sensors_dir = get_session_subdir("sensors", session_dir)
         for sensor_name in selected:
             if sensor_name in sensor_states:
                 sensor_data = sensor_states[sensor_name]
@@ -196,7 +200,7 @@ def show_log(canvas, sensor_states, load_active):
                     consumption_list = [None] * len(time_list)
 
                 filename = f"{sensor_name}_log.csv".replace(" ", "_")
-                file_path = session_dir / filename
+                file_path = sensors_dir / filename
                 try:
                     with open(file_path, mode="w", newline="", encoding="utf-8") as file:
                         writer = csv.writer(file)
@@ -325,7 +329,8 @@ def start_interaction_log_session(session_label: str = ""):
 
     session_dir = create_new_save_session(suffix=suffix)
     _interaction_session_dir = str(session_dir)
-    _interaction_file_path = os.path.join(_interaction_session_dir, "interactions.csv")
+    interactions_dir = get_session_subdir("interactions", session_dir)
+    _interaction_file_path = str(interactions_dir / "interactions.csv")
     _interaction_file = open(_interaction_file_path, mode="w", newline="", encoding="utf-8")
     import csv as _csv
     writer = _csv.writer(_interaction_file)

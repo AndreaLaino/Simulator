@@ -18,14 +18,14 @@ def _sensor_type(name: str, sensor_states: dict) -> str | None:
         return t
     try:
         for s in (sensors or []):
-            if s[0] == name and len(s) > 3:
-                return s[3]
+            if s.name == name:
+                return s.type
     except Exception:
         pass
     try:
         for s in (read_sensors or []):
-            if s[0] == name and len(s) > 3:
-                return s[3]
+            if s.name == name:
+                return s.type
     except Exception:
         pass
     return None
@@ -41,12 +41,12 @@ def _all_sensor_names(sensor_states: dict) -> list[str]:
         pass
     try:
         for s in (sensors or []):
-            names.add(s[0])
+            names.add(s.name)
     except Exception:
         pass
     try:
         for s in (read_sensors or []):
-            names.add(s[0])
+            names.add(s.name)
     except Exception:
         pass
     return sorted(names)
@@ -63,8 +63,8 @@ def _smart_meter_display_name(sensor_name: str, sensor_states: dict) -> str:
     if not assoc:
         try:
             for s in (sensors or []):
-                if s[0] == sensor_name and len(s) > 10 and s[10] not in (None, "", "None"):
-                    assoc = str(s[10]).strip()
+                if s.name == sensor_name and getattr(s, "associated_device", None) not in (None, "", "None"):
+                    assoc = str(s.associated_device).strip()
                     break
         except Exception:
             pass
@@ -72,8 +72,8 @@ def _smart_meter_display_name(sensor_name: str, sensor_states: dict) -> str:
     if not assoc:
         try:
             for s in (read_sensors or []):
-                if s[0] == sensor_name and len(s) > 10 and s[10] not in (None, "", "None"):
-                    assoc = str(s[10]).strip()
+                if s.name == sensor_name and getattr(s, "associated_device", None) not in (None, "", "None"):
+                    assoc = str(s.associated_device).strip()
                     break
         except Exception:
             pass
@@ -81,8 +81,8 @@ def _smart_meter_display_name(sensor_name: str, sensor_states: dict) -> str:
     if assoc:
         try:
             for d in (read_devices or []):
-                if isinstance(d, tuple) and len(d) > 3 and d[0] == assoc:
-                    return _normalize_device_label(str(d[3]))
+                if d.name == assoc:
+                    return _normalize_device_label(str(d.type))
         except Exception:
             pass
 
@@ -91,8 +91,6 @@ def _smart_meter_display_name(sensor_name: str, sensor_states: dict) -> str:
             for d in (runtime_devices or []):
                 if hasattr(d, "name") and hasattr(d, "type") and d.name == assoc:
                     return _normalize_device_label(str(d.type))
-                if isinstance(d, tuple) and len(d) > 3 and d[0] == assoc:
-                    return _normalize_device_label(str(d[3]))
         except Exception:
             pass
 
@@ -106,8 +104,8 @@ def _smart_meter_display_name(sensor_name: str, sensor_states: dict) -> str:
 
         try:
             for d in (read_devices or []):
-                if isinstance(d, tuple) and len(d) > 3 and d[0] == guessed_dev_name:
-                    return _normalize_device_label(str(d[3]))
+                if d.name == guessed_dev_name:
+                    return _normalize_device_label(str(d.type))
         except Exception:
             pass
 
@@ -116,8 +114,6 @@ def _smart_meter_display_name(sensor_name: str, sensor_states: dict) -> str:
             for d in (runtime_devices or []):
                 if hasattr(d, "name") and hasattr(d, "type") and d.name == guessed_dev_name:
                     return _normalize_device_label(str(d.type))
-                if isinstance(d, tuple) and len(d) > 3 and d[0] == guessed_dev_name:
-                    return _normalize_device_label(str(d[3]))
         except Exception:
             pass
 

@@ -112,11 +112,11 @@ def close_current_activity(timer_app_instance, activity_label=None):
 
 def detect_cooking(sensor_states, devices, sensors, walls, doors):
     for device in devices:
-        name, x, y, type, _, state, *_ = device
+        name, x, y, type, state = device.name, device.x, device.y, device.type, device.state
         if re.match(r'^oven\d*$', type, re.IGNORECASE) and state == 1:
             pir = find_closest_sensor_within_fov((x, y), sensors, walls, doors, RADIUS_STANDARD, FOV_ANGLE)
             if pir:
-                pir_state = sensor_states.get(pir[0], {}).get('state', [])
+                pir_state = sensor_states.get(pir.name, {}).get('state', [])
                 if pir_state and pir_state[-1] == 1:
                     return "cooking"
     return None
@@ -128,7 +128,7 @@ def detect_laundry(sensor_states, devices):
             state = data['state'][-1] if data['state'] else 0
             if assoc:
                 for d in devices:
-                    if d[0] == assoc and d[3].lower() == "washing_machine" and state > 0:
+                    if d.name == assoc and d.type.lower() == "washing_machine" and state > 0:
                         return "laundry"
     return None
 
@@ -139,7 +139,7 @@ def detect_dishwasher(sensor_states, devices):
             state = data['state'][-1] if data['state'] else 0
             if assoc:
                 for d in devices:
-                    if d[0] == assoc and d[3].lower() == "dishwasher" and state > 0:
+                    if d.name == assoc and d.type.lower() == "dishwasher" and state > 0:
                         return "dishwasher"
     return None
 
@@ -150,7 +150,7 @@ def detect_office(sensor_states, devices):
             state = data['state'][-1] if data['state'] else 0
             if assoc:
                 for d in devices:
-                    if d[0] == assoc and d[3].lower() == "computer" and state > 0:
+                    if d.name == assoc and d.type.lower() == "computer" and state > 0:
                         return "office"
     return None
 
@@ -173,8 +173,8 @@ def detect_exiting_home(sensor_states, sensors, timer_app_instance):
     entrance_state = None
     entrance_name = None
     for s in sensors:
-        if s[0].lower() == "entrance" and s[3].lower() == "switch":
-            entrance_name = s[0]
+        if s.name.lower() == "entrance" and s.type.lower() == "switch":
+            entrance_name = s.name
             entrance_state = sensor_states.get(entrance_name, {}).get("state", [])
             break
 
@@ -199,8 +199,8 @@ def detect_exiting_home(sensor_states, sensors, timer_app_instance):
             # checks that all PIRs are at 0 (last seen state)
             all_zero = True
             for s in sensors:
-                if s[3] == "PIR":
-                    seq = sensor_states.get(s[0], {}).get("state", [])
+                if s.type == "PIR":
+                    seq = sensor_states.get(s.name, {}).get("state", [])
                     if seq and seq[-1] == 1:
                         all_zero = False
                         break
@@ -237,8 +237,8 @@ def detect_entering_home(sensor_states, sensors, timer_app_instance, activity_la
     if not exit_activated:
         # prev_entry_state so as not to lose the first useful front
         for s in sensors:
-            if s[0].lower() == "entrance" and s[3].lower() == "switch":
-                curr = sensor_states.get(s[0], {}).get("state", [])
+            if s.name.lower() == "entrance" and s.type.lower() == "switch":
+                curr = sensor_states.get(s.name, {}).get("state", [])
                 prev_entry_state = (curr[-1] if curr else 0)
                 break
         return None
@@ -246,8 +246,8 @@ def detect_entering_home(sensor_states, sensors, timer_app_instance, activity_la
     # Current entrance switch state
     entrance_state = None
     for s in sensors:
-        if s[0].lower() == "entrance" and s[3].lower() == "switch":
-            entrance_state = sensor_states.get(s[0], {}).get("state", [])
+        if s.name.lower() == "entrance" and s.type.lower() == "switch":
+            entrance_state = sensor_states.get(s.name, {}).get("state", [])
             break
 
     curr_entrance = entrance_state[-1] if entrance_state else 0
@@ -270,9 +270,9 @@ def detect_entering_home(sensor_states, sensors, timer_app_instance, activity_la
             returning_triggered = False
         else:
             active_pir = any(
-                (sensor_states.get(s[0], {}).get("state", []) and
-                 sensor_states.get(s[0], {}).get("state")[-1] == 1)
-                for s in sensors if s[3] == "PIR"
+                (sensor_states.get(s.name, {}).get("state", []) and
+                 sensor_states.get(s.name, {}).get("state")[-1] == 1)
+                for s in sensors if s.type == "PIR"
             )
             if active_pir:
                 returning_triggered = False
@@ -317,7 +317,7 @@ def detect_sleeping(sensor_states, sensors, points, timer_app_instance):
     bed_pattern = re.compile(r'^bed\d*$', re.IGNORECASE)
 
     # search all 'bed*' points
-    beds = [(name, x, y) for (name, x, y) in points if bed_pattern.match(name)]
+    beds = [(point.name, point.x, point.y) for point in points if bed_pattern.match(point.name)]
 
     def dist(ax, ay, bx, by):
         return ((ax - bx) ** 2 + (ay - by) ** 2) ** 0.5
@@ -327,7 +327,7 @@ def detect_sleeping(sensor_states, sensors, points, timer_app_instance):
     for _, lx, ly in beds:
         # search weight sensor near bed
         for s in sensors:
-            name, sx, sy, type, *_ = s
+            name, sx, sy, type = s.name, s.x, s.y, s.type
             if type == "Weight" and dist(lx, ly, sx, sy) < 30:
                 state_seq = sensor_states.get(name, {}).get('state', [])
                 active = bool(state_seq and state_seq[-1] == 1)
@@ -356,9 +356,9 @@ def detect_meal(sensor_states, sensors, devices, timer_app_instance):
     # find table coordinates
     table_coords = None
     table_pattern = re.compile(r'^table\d*$', re.IGNORECASE)
-    for name, x, y in (points + coordinates):
-        if table_pattern.match(name):
-            table_coords = (x, y)
+    for point in (points + coordinates):
+        if table_pattern.match(point.name):
+            table_coords = (point.x, point.y)
             break
 
     # search for Active Weight sensor near the table
@@ -367,7 +367,7 @@ def detect_meal(sensor_states, sensors, devices, timer_app_instance):
             return False
         tx, ty = table_coords
         for s in sensors:
-            name, sx, sy, type, *_ = s
+            name, sx, sy, type = s.name, s.x, s.y, s.type
             if type == "Weight":
                 dist = ((tx - sx)**2 + (ty - sy)**2) ** 0.5
                 if dist <= TABLE_RADIUS:
@@ -393,12 +393,12 @@ def detect_meal(sensor_states, sensors, devices, timer_app_instance):
 
     if slot:
         for d in devices:
-            name, x, y, type, _, state, *_ = d
+            name, x, y, type, state = d.name, d.x, d.y, d.type, d.state
             # oven off
             if type.lower() == "oven" and state == 0:
                 pir = find_closest_sensor_within_fov((x, y), sensors, walls_coordinates, doors, RADIUS_STANDARD, FOV_ANGLE)
                 if pir:
-                    state = sensor_states.get(pir[0], {}).get("state", [])
+                    state = sensor_states.get(pir.name, {}).get("state", [])
                     if state and state[-1] == 1:
                         if not weight_active_near_table():
                             return None

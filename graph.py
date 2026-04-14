@@ -98,20 +98,12 @@ def _associated_device_name(sensor_name: str, sensor_states: dict) -> str | None
         return assoc.strip()
 
     for s in sensors:
-        if isinstance(s, Sensor):
-            if s.name == sensor_name and getattr(s, "associated_device", None):
-                return str(s.associated_device).strip()
-        else:
-            if len(s) > 10 and s[0] == sensor_name and s[10] not in (None, "", "None"):
-                return str(s[10]).strip()
+        if s.name == sensor_name and getattr(s, "associated_device", None):
+            return str(s.associated_device).strip()
 
     for s in read_sensors:
-        if isinstance(s, Sensor):
-            if s.name == sensor_name and getattr(s, "associated_device", None):
-                return str(s.associated_device).strip()
-        else:
-            if len(s) > 10 and s[0] == sensor_name and s[10] not in (None, "", "None"):
-                return str(s[10]).strip()
+        if s.name == sensor_name and getattr(s, "associated_device", None):
+            return str(s.associated_device).strip()
 
     return None
 
@@ -120,20 +112,12 @@ def _device_type_for_name(device_name: str | None) -> str | None:
     if not device_name:
         return None
     for d in devices:
-        if isinstance(d, Device):
-            if d.name == device_name:
-                return d.type
-        else:
-            if len(d) > 3 and d[0] == device_name:
-                return d[3]
+        if d.name == device_name:
+            return d.type
 
     for d in read_devices:
-        if isinstance(d, Device):
-            if d.name == device_name:
-                return d.type
-        else:
-            if len(d) > 3 and d[0] == device_name:
-                return d[3]
+        if d.name == device_name:
+            return d.type
     return None
 
 
@@ -579,20 +563,12 @@ def _sensor_type(name: str, sensor_states: dict):
         return t
     # from runtime
     for s in sensors:
-        if isinstance(s, Sensor):
-            if s.name == name:
-                return s.type
-        else:
-            if s[0] == name:
-                return s[3]
+        if s.name == name:
+            return s.type
     # from uploaded from files
     for s in read_sensors:
-        if isinstance(s, Sensor):
-            if s.name == name:
-                return s.type
-        else:
-            if s[0] == name:
-                return s[3]
+        if s.name == name:
+            return s.type
     # if 'consumption' exists = Smart Meter
     if "consumption" in sensor_states.get(name, {}):
         return "Smart Meter"
@@ -600,15 +576,20 @@ def _sensor_type(name: str, sensor_states: dict):
 
 
 def _latest_interactions_csv():
-    logs_root = "logs"
-    if not os.path.isdir(logs_root):
-        return None
     candidates = []
-    for name in os.listdir(logs_root):
-        folder = os.path.join(logs_root, name)
-        csv_path = os.path.join(folder, "interactions.csv")
-        if os.path.isdir(folder) and os.path.isfile(csv_path):
-            candidates.append((os.path.getmtime(csv_path), csv_path))
+
+    def _collect(root_dir: str):
+        if not os.path.isdir(root_dir):
+            return
+        for root, _dirs, files in os.walk(root_dir):
+            if "interactions.csv" in files:
+                csv_path = os.path.join(root, "interactions.csv")
+                candidates.append((os.path.getmtime(csv_path), csv_path))
+
+    # New structured location first, then legacy logs fallback.
+    _collect("saves")
+    _collect("logs")
+
     if not candidates:
         return None
     candidates.sort(reverse=True)

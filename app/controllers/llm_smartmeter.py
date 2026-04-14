@@ -17,7 +17,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from app.context import AppContext
 from app.logging_setup import setup_logging
-from app.save_paths import get_or_create_current_save_session
+from app.save_paths import get_or_create_current_save_session, get_session_subdir
 
 logger = setup_logging("controllers.llm_smartmeter")
 
@@ -64,6 +64,36 @@ class LlmRunResult:
     output_dir: Path
     cases_eval_csv: Path
     selected_case_csv: Path
+
+
+def _archive_llm_run_to_saves(result: LlmRunResult) -> Path:
+    session_dir = get_or_create_current_save_session(suffix="llm")
+    devices_k_dir = get_session_subdir("devices_k", session_dir)
+
+    stamp = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
+    run_dir = devices_k_dir / result.appliance_key / f"run_{stamp}_k{result.chosen_k}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    metadata = {
+        "appliance_key": result.appliance_key,
+        "chosen_k": int(result.chosen_k),
+        "dominant_cluster": int(result.dominant_cluster),
+        "dominant_cluster_n_cycles": int(result.dominant_cluster_n_cycles),
+        "selected_cluster": int(result.selected_cluster),
+        "selected_cycle_id": int(result.selected_cycle_id),
+        "canonical_output_dir": str(result.output_dir),
+        "cases_eval_csv": str(result.cases_eval_csv),
+        "selected_case_csv": str(result.selected_case_csv),
+        "archived_at": pd.Timestamp.now().isoformat(),
+    }
+    (run_dir / "metadata.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    if result.cases_eval_csv.exists():
+        shutil.copy2(result.cases_eval_csv, run_dir / result.cases_eval_csv.name)
+    if result.selected_case_csv.exists():
+        shutil.copy2(result.selected_case_csv, run_dir / result.selected_case_csv.name)
+
+    return run_dir
 
 
 def _upsert_runtime_profile(
@@ -289,11 +319,6 @@ def _run_llm_pipeline(
     output_dir = LLM_SM_DIR / cfg["folder"] / cfg["output"]
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Keep a session-scoped mirror as historical archive.
-    session_dir = get_or_create_current_save_session(suffix="llm")
-    session_output_dir = session_dir / "llm" / cfg["folder"] / cfg["output"]
-    session_output_dir.mkdir(parents=True, exist_ok=True)
-
     df = _load_time_value_csv(csv_path)
     runtime_tsv = output_dir / "llm_runtime_input.tsv"
     df[["time", "value"]].to_csv(runtime_tsv, sep="\t", index=False)
@@ -311,14 +336,6 @@ def _run_llm_pipeline(
         params=params,
         exact_k=exact_k,
     )
-
-    # Mirror latest canonical outputs into the current session archive.
-    for item in output_dir.iterdir():
-        dst = session_output_dir / item.name
-        if item.is_dir():
-            shutil.copytree(item, dst, dirs_exist_ok=True)
-        else:
-            shutil.copy2(item, dst)
 
     if k_mode == "custom":
         chosen_k = int(custom_k)
@@ -566,6 +583,7 @@ def open_llm_smartmeter_ui(ctx: AppContext):
                 custom_k=custom_k,
                 custom_params_path=custom_params_path,
             )
+            archive_dir = _archive_llm_run_to_saves(result)
 
             def _done_ok():
                 _set_running(False)
@@ -579,7 +597,8 @@ def open_llm_smartmeter_ui(ctx: AppContext):
                     f"Selected cluster: {result.selected_cluster}\n\n"
                     f"Selected cycle id: {result.selected_cycle_id}\n\n"
                     f"Cases CSV: {result.cases_eval_csv}\n"
-                    f"Selected case CSV: {result.selected_case_csv}",
+                    f"Selected case CSV: {result.selected_case_csv}\n"
+                    f"Saved devices_k run: {archive_dir}",
                 )
 
             win.after(0, _done_ok)

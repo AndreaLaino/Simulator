@@ -32,7 +32,7 @@ def add_point(canvas, event, load_active):
     point = Point(name=point_name, x=x, y=y)
 
     if load_active:
-        coordinates.append(point.tuple())
+        coordinates.append(point)
     else:
         points.append(point)
     # Update canvas with the point
@@ -46,11 +46,8 @@ def point_name_exists(name: str) -> bool:
     # Names in runtime list
     runtime_names = set()
     for p in points:
-        if isinstance(p, Point):
-            runtime_names.add(p.name.strip().lower())
-        else:
-            runtime_names.add(p[0].strip().lower())
+        runtime_names.add(p.name.strip().lower())
     
     # Names in loaded-from-file list
-    file_names = {p[0].strip().lower() for p in coordinates}
+    file_names = {p.name.strip().lower() for p in coordinates}
     return target in runtime_names or target in file_names

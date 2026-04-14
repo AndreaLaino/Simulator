@@ -350,7 +350,27 @@ def add_sensor(canvas, event, load_active):
     x = int(canvas.canvasx(event.x))
     y = int(canvas.canvasy(event.y))
 
-    dialog = SensorDialog(canvas.master, "Add sensor")
+    # Build device candidates from both data structures and what is currently drawn.
+    device_names = set()
+    for dev in devices or []:
+        if hasattr(dev, "name") and dev.name:
+            device_names.add(str(dev.name).strip())
+    for dev in devices_file or []:
+        if hasattr(dev, "name") and dev.name:
+            device_names.add(str(dev.name).strip())
+
+    try:
+        for item_id in canvas.find_withtag("device"):
+            tags = canvas.gettags(item_id)
+            if tags:
+                # First tag is the device name in draw_device().
+                name_tag = str(tags[0]).strip()
+                if name_tag and name_tag != "device":
+                    device_names.add(name_tag)
+    except Exception:
+        pass
+
+    dialog = SensorDialog(canvas.master, "Add sensor", device_names=sorted(n for n in device_names if n))
     if dialog.result:
         name, type, min_val, max_val, step, state, direction, consumption, associated_device = dialog.result
         sensor = Sensor(
@@ -369,7 +389,7 @@ def add_sensor(canvas, event, load_active):
 
         # write to the right list according to load_active
         if load_active:
-            sensors_file.append(sensor.tuple())
+            sensors_file.append(sensor)
         else:
             sensors.append(sensor)
 
@@ -377,51 +397,21 @@ def add_sensor(canvas, event, load_active):
 
 
 def changePIR(canvas, sensor, sensors, new_state=None):
-    # Handle both Sensor objects and tuples
-    if isinstance(sensor, Sensor):
-        name, x, y, type_s, min_val = sensor.name, sensor.x, sensor.y, sensor.type, sensor.min_val
-        state = float(sensor.state)
-        direction, consumption, associated_device = sensor.direction, sensor.consumption, sensor.associated_device
-    else:
-        if len(sensor) != 11:
-            print(f"Error: wrong sensor structure {sensor}")
-            return None, None, sensors
-        name, x, y, type_s, min_val, max_val, step, state, direction, consumption, associated_device = sensor
-        state = float(state)
+    name, x, y, type_s, min_val = sensor.name, sensor.x, sensor.y, sensor.type, sensor.min_val
+    state = float(sensor.state)
 
     if new_state is None:
         new_state = 1 if state == 0 else 0
 
-    updated_sensors = []
     for s in sensors:
-        if s == sensor or (isinstance(s, Sensor) and isinstance(sensor, Sensor) and s.name == sensor.name):
-            if isinstance(s, Sensor):
-                s.state = float(new_state)
-                updated_sensors.append(s)
-            else:
-                updated_sensors.append(
-                    (
-                        name, x, y, type_s, min_val, max_val if len(s) > 5 else min_val,
-                        step if len(s) > 6 else 1.0,
-                        new_state,
-                        direction, consumption, associated_device,
-                    )
-                )
-        elif (isinstance(s, Sensor) and s.type == "PIR") or (isinstance(s, tuple) and s[3] == "PIR"):
-            if isinstance(s, Sensor):
-                s.state = 0.0
-                updated_sensors.append(s)
-                update_sensor_color(canvas, s.name, 0, s.min_val)
-            else:
-                updated_sensors.append(
-                    (s[0], s[1], s[2], s[3], s[4], s[5], s[6], 0, s[8], s[9], s[10])
-                )
-                update_sensor_color(canvas, s[0], 0, s[4])
-        else:
-            updated_sensors.append(s)
+        if s.name == sensor.name:
+            s.state = float(new_state)
+        elif s.type == "PIR":
+            s.state = 0.0
+            update_sensor_color(canvas, s.name, 0, s.min_val)
 
     update_sensor_color(canvas, name, new_state, float(min_val))
-    return name, new_state, updated_sensors
+    return name, new_state, sensors
 
 
 def get_last_real_temperature(sensor_name: str, window_minutes: int = 10):
@@ -514,16 +504,14 @@ def changeTemperature(canvas, sensor, sensors, heating_factor, delta_seconds, cu
           * Thermal inertia (slow, gradual changes)
       - If real CSV exists beyond sim_min: optionally blend/compare
     """
-    if len(sensor) != 11:
-        print(f"Error: unexpected Temperature structure {sensor}")
-        return None, None, sensors
-
-    (
-        name, x, y, s_type,
-        min_val, max_val, step,
-        state, direction, consumption,
-        associated_device,
-    ) = sensor
+    name, x, y, s_type = sensor.name, sensor.x, sensor.y, sensor.type
+    min_val = sensor.min_val
+    max_val = sensor.max_val
+    step = sensor.step
+    state = sensor.state
+    direction = sensor.direction
+    consumption = sensor.consumption
+    associated_device = sensor.associated_device
 
     min_val = float(min_val)
     max_val = float(max_val)
@@ -832,46 +820,20 @@ def _get_llm_smartmeter_consumption(
 def _find_associated_device(dev_list, wanted_name):
     if not dev_list or not wanted_name:
         return None
-    return next(
-        (
-            d
-            for d in dev_list
-            if (d.name if isinstance(d, Device) else d[0]) == wanted_name
-        ),
-        None,
-    )
+    return next((d for d in dev_list if d.name == wanted_name), None)
 
 
 def changeSmartMeter(canvas, sensor, sensors, devices, delta_seconds, current_datetime):
-    if isinstance(sensor, Sensor):
-        name = sensor.name
-        x = sensor.x
-        y = sensor.y
-        type = sensor.type
-        min_val = sensor.min_val
-        max_val = sensor.max_val
-        step = sensor.step
-        state = sensor.state
-        direction = sensor.direction
-        associated_device = sensor.associated_device
-    else:
-        if len(sensor) < 11:
-            print(f"[WARN] Unexpected Smart Meter structure: {sensor}")
-            return sensor[0] if sensor else None, 0.0, sensors
-
-        (
-            name,
-            x,
-            y,
-            type,
-            min_val,
-            max_val,
-            step,
-            state,
-            direction,
-            _old_consumption,
-            associated_device,
-        ) = sensor
+    name = sensor.name
+    x = sensor.x
+    y = sensor.y
+    type = sensor.type
+    min_val = sensor.min_val
+    max_val = sensor.max_val
+    step = sensor.step
+    state = sensor.state
+    direction = sensor.direction
+    associated_device = sensor.associated_device
 
     new_consumption = 0.0
 
@@ -904,77 +866,49 @@ def changeSmartMeter(canvas, sensor, sensors, devices, delta_seconds, current_da
                 new_consumption = 0.0
 
     # update the sensor array with new consumption
-    updated = []
-    for s in sensors:
-        if s == sensor:
-            updated.append(
-                (
-                    name,
-                    x,
-                    y,
-                    type,
-                    min_val,
-                    max_val,
-                    step,
-                    state,
-                    direction,
-                    new_consumption,
-                    associated_device,
-                )
-            )
-        else:
-            updated.append(s)
+    sensor.consumption = new_consumption
 
     # update color (green if above minimum threshold)
     update_sensor_color(canvas, name, new_consumption, min_val)
 
-    return name, new_consumption, updated
+    return name, new_consumption, sensors
 
 
 def ChangeWeight(canvas, sensor, sensors, new_state):
-    if len(sensor) != 11:
-        print(f"Error: unexpected Weight structure {sensor}")
-        return None, None, sensors
+    name, x, y, type, min_val = sensor.name, sensor.x, sensor.y, sensor.type, sensor.min_val
 
-    (
-        name,
-        x,
-        y,
-        type,
-        min_val,
-        max_val,
-        step,
-        state,
-        direction,
-        consumption,
-        associated_device,
-    ) = sensor
-
-    updated_sensors = []
-    for s in sensors:
-        if s == sensor:
-            updated_sensor = (
-                name,
-                x,
-                y,
-                type,
-                min_val,
-                max_val,
-                step,
-                new_state,
-                direction,
-                consumption,
-                associated_device,
-            )
-            updated_sensors.append(updated_sensor)
-        else:
-            updated_sensors.append(s)
+    sensor.state = float(new_state)
 
     update_sensor_color(canvas, name, new_state, float(min_val))
-    return name, new_state, updated_sensors
+    return name, new_state, sensors
 
 
 class SensorDialog(simpledialog.Dialog):
+    def __init__(self, parent, title=None, device_names=None):
+        self._preloaded_device_names = list(device_names or [])
+        super().__init__(parent, title)
+
+    def _device_names_for_association(self) -> list[str]:
+        names = set()
+
+        for name in self._preloaded_device_names:
+            if name:
+                names.add(str(name).strip())
+
+        for dev in devices or []:
+            if hasattr(dev, "name") and dev.name:
+                names.add(str(dev.name).strip())
+            elif isinstance(dev, tuple) and len(dev) > 0 and dev[0]:
+                names.add(str(dev[0]).strip())
+
+        for dev in devices_file or []:
+            if hasattr(dev, "name") and dev.name:
+                names.add(str(dev.name).strip())
+            elif isinstance(dev, tuple) and len(dev) > 0 and dev[0]:
+                names.add(str(dev[0]).strip())
+
+        return sorted(n for n in names if n)
+
     def body(self, master):
         tk.Label(master, text="Sensor name:").grid(row=0)
         tk.Label(master, text="Sensor type:").grid(row=1)
@@ -996,16 +930,7 @@ class SensorDialog(simpledialog.Dialog):
 
         self.associated_device_label = tk.Label(master, text="Associated device:")
 
-        # Handle both Device objects and tuples
-        devices_names_runtime = []
-        for d in devices:
-            if isinstance(d, Device):
-                devices_names_runtime.append(d.name)
-            else:
-                devices_names_runtime.append(d[0])
-        
-        devices_names_file = [d[0] for d in devices_file] if devices_file else []
-        devices_names = sorted(set(devices_names_runtime + devices_names_file))
+        devices_names = self._device_names_for_association()
 
         self.associated_device_combobox = ttk.Combobox(master, values=devices_names, state="readonly")
 
@@ -1028,10 +953,18 @@ class SensorDialog(simpledialog.Dialog):
             self.direction_label.grid_remove()
             self.direction_entry.grid_remove()
 
+            devices_names = self._device_names_for_association()
+            if devices_names:
+                self.associated_device_combobox.configure(values=devices_names, state="readonly")
+            else:
+                self.associated_device_combobox.configure(values=["No devices available"], state="disabled")
+
             self.associated_device_label.grid(row=2, column=0)
             self.associated_device_combobox.grid(row=2, column=1)
 
-            if self.associated_device_combobox["values"]:
+            if devices_names:
+                self.associated_device_combobox.current(0)
+            else:
                 self.associated_device_combobox.current(0)
 
         else:
@@ -1049,17 +982,12 @@ class SensorDialog(simpledialog.Dialog):
 
         # Check both runtime sensors and file sensors
         for s in sensors:
-            if isinstance(s, Sensor):
-                if name == s.name:
-                    messagebox.showwarning("Input not valid", "Sensor name already exists.")
-                    return False
-            else:
-                if name == s[0]:
-                    messagebox.showwarning("Input not valid", "Sensor name already exists.")
-                    return False
+            if name == s.name:
+                messagebox.showwarning("Input not valid", "Sensor name already exists.")
+                return False
         
         for s in sensors_file:
-            if isinstance(s, tuple) and name == s[0]:
+            if name == s.name:
                 messagebox.showwarning("Input not valid", "Sensor name already exists.")
                 return False
 
@@ -1071,6 +999,13 @@ class SensorDialog(simpledialog.Dialog):
             messagebox.showwarning(
                 "Input not valid",
                 "Select a device to associate with the Smart Meter.",
+            )
+            return False
+
+        if self.sensor_type.get() == "Smart Meter" and self.associated_device_combobox.get() == "No devices available":
+            messagebox.showwarning(
+                "Input not valid",
+                "Add at least one device before adding a Smart Meter.",
             )
             return False
 

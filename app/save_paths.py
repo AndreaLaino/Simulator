@@ -14,6 +14,13 @@ DEVICES_DIR = BASE_DIR / "devices"
 _session_lock = threading.Lock()
 _current_session_dir: Path | None = None
 
+SESSION_SUBDIRS = {
+    "interactions": "interactions",
+    "sensors": "sensors",
+    "activities": "activities",
+    "devices_k": "devices_k",
+}
+
 
 def _sanitize_suffix(value: str) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", value.strip())
@@ -39,6 +46,21 @@ def _session_stamp_minute() -> str:
     return datetime.now().strftime("%Y%m%d_%H%M")
 
 
+def ensure_session_subdirs(session_dir: Path) -> None:
+    for rel in SESSION_SUBDIRS.values():
+        (session_dir / rel).mkdir(parents=True, exist_ok=True)
+
+
+def get_session_subdir(kind: str, session_dir: Path | None = None) -> Path:
+    if kind not in SESSION_SUBDIRS:
+        raise ValueError(f"Unknown session subdir kind: {kind}")
+
+    base = session_dir if session_dir is not None else get_or_create_current_save_session()
+    out = base / SESSION_SUBDIRS[kind]
+    out.mkdir(parents=True, exist_ok=True)
+    return out
+
+
 def create_new_save_session(suffix: str = "") -> Path:
     global _current_session_dir
 
@@ -57,6 +79,7 @@ def create_new_save_session(suffix: str = "") -> Path:
             idx += 1
 
         candidate.mkdir(parents=True, exist_ok=False)
+        ensure_session_subdirs(candidate)
         _current_session_dir = candidate
         return candidate
 

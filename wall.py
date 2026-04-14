@@ -1,10 +1,10 @@
 import tkinter as tk
 from point import points
 from read import read_walls_coordinates, coordinates, read_walls
-from models import Point
+from models import Point, Wall
 
-walls = []
-walls_coordinates = []
+walls: list[Wall] = []
+walls_coordinates: list[Wall] = []
 
 def draw_line_window(canvas, window, load_active):
     global walls
@@ -27,11 +27,7 @@ def draw_line_window(canvas, window, load_active):
         coord_point1 = None
         coord_point2 = None
         for point in point_source:
-            # Handle both Point objects and tuples
-            if isinstance(point, Point):
-                point_name, point_x, point_y = point.name, point.x, point.y
-            else:
-                point_name, point_x, point_y = point[0], point[1], point[2]
+            point_name, point_x, point_y = point.name, point.x, point.y
             
             if point_name == point1:
                 coord_point1 = (point_x, point_y)
@@ -40,11 +36,9 @@ def draw_line_window(canvas, window, load_active):
 
         # If both points exist, draw the line
         if coord_point1 and coord_point2:
-            canvas.create_line(coord_point1, coord_point2, fill="red", width=3, tags='wall')
-            walls_coordinates.append(coord_point1[0])
-            walls_coordinates.append(coord_point1[1])
-            walls_coordinates.append(coord_point2[0])
-            walls_coordinates.append(coord_point2[1])
+            wall = Wall(x1=coord_point1[0], y1=coord_point1[1], x2=coord_point2[0], y2=coord_point2[1])
+            canvas.create_line(wall.x1, wall.y1, wall.x2, wall.y2, fill="red", width=3, tags='wall')
+            walls_coordinates.append(wall)
             window_line.destroy()
 
     # Dialog to input point names

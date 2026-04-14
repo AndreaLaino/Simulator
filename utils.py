@@ -71,11 +71,7 @@ def _temperature_color(sensor_name: str, changing: bool = False) -> str:
 
 
 def draw_sensor(canvas, sensor):
-    # Handle both Sensor objects and tuples
-    if isinstance(sensor, Sensor):
-        name, x, y, type_s, min_val, state = sensor.name, sensor.x, sensor.y, sensor.type, sensor.min_val, sensor.state
-    else:
-        name, x, y, type_s, min_val, max_val, step, state, direction, consumption, associated_device = sensor
+    name, x, y, type_s, min_val, state = sensor.name, sensor.x, sensor.y, sensor.type, sensor.min_val, sensor.state
     
     # Default coloring:
     #   - Temperature sensors: red by default; green only when changing
@@ -105,20 +101,11 @@ def draw_fov(canvas, x, y, max_distance, fov_angle, direction):
                           fill="", outline="blue", width=2, tags='fov')
 
 def get_nearby_device_states(sensor, devices, walls, doors, max_distance=100):
-    # Handle both Sensor objects and tuples
-    if isinstance(sensor, Sensor):
-        x1, y1 = sensor.x, sensor.y
-    else:
-        x1, y1 = sensor[1], sensor[2]
+    x1, y1 = sensor.x, sensor.y
     
     nearby_device_states = []
     for device in devices:
-        # Handle both Device objects and tuples
-        if isinstance(device, Device):
-            dx, dy, state = device.x, device.y, device.state
-        else:
-            # device structure: (name, x, y, type, power, state, ...)
-            dx, dy, state = device[1], device[2], device[5]
+        dx, dy, state = device.x, device.y, device.state
         
         if calculate_distance(x1, y1, dx, dy) <= max_distance:
             if not is_path_blocked_by_walls(x1, y1, dx, dy, walls, doors):
@@ -126,12 +113,7 @@ def get_nearby_device_states(sensor, devices, walls, doors, max_distance=100):
     return nearby_device_states
 
 def is_within_fov(sensor, x, y, max_distance, fov_angle):
-    # Handle both Sensor objects and tuples
-    if isinstance(sensor, Sensor):
-        sx, sy, direction = sensor.x, sensor.y, sensor.direction
-    else:
-        # Assume sensor[8] holds the direction
-        sx, sy, direction = sensor[1], sensor[2], sensor[8]
+    sx, sy, direction = sensor.x, sensor.y, sensor.direction
     
     dx, dy = x - sx, y - sy
     distance = math.hypot(dx, dy)
@@ -150,22 +132,15 @@ def find_closest_sensor_without_intersection(point, sensors, walls_coordinates):
     x1, y1 = point
     
     def sensor_distance(s):
-        if isinstance(s, Sensor):
-            return calculate_distance(x1, y1, s.x, s.y)
-        else:
-            return calculate_distance(x1, y1, s[1], s[2])
+        return calculate_distance(x1, y1, s.x, s.y)
     
     sensors_sorted = sorted(sensors, key=sensor_distance)
     for sensor in sensors_sorted:
-        if isinstance(sensor, Sensor):
-            x2, y2 = sensor.x, sensor.y
-        else:
-            x2, y2 = sensor[1], sensor[2]
+        x2, y2 = sensor.x, sensor.y
         
         intersects = False
-        for i in range(0, len(walls_coordinates), 4):
-            p1, p2, p3, p4 = walls_coordinates[i:i + 4]
-            if intersect(x1, y1, x2, y2, p1, p2, p3, p4):
+        for wall in walls_coordinates:
+            if intersect(x1, y1, x2, y2, wall.x1, wall.y1, wall.x2, wall.y2):
                 intersects = True
                 break
         if not intersects:
@@ -177,40 +152,23 @@ def find_closest_sensor_within_fov(point, sensors, walls_coordinates, doors, max
     visible_sensors = [s for s in sensors if is_within_fov(s, x, y, max_distance, fov_angle)]
     
     def sensor_distance(s):
-        if isinstance(s, Sensor):
-            return calculate_distance(x, y, s.x, s.y)
-        else:
-            return calculate_distance(x, y, s[1], s[2])
+        return calculate_distance(x, y, s.x, s.y)
     
     visible_sensors.sort(key=sensor_distance)
     for sensor in visible_sensors:
-        if isinstance(sensor, Sensor):
-            sx, sy = sensor.x, sensor.y
-        else:
-            sx, sy = sensor[1], sensor[2]
+        sx, sy = sensor.x, sensor.y
         
         if not is_path_blocked_by_walls(sx, sy, x, y, walls_coordinates, doors):
             return sensor
     return None
 
 def is_path_blocked_by_walls(x1, y1, x2, y2, walls_coordinates, doors):
-    for i in range(0, len(walls_coordinates), 4):
-        p1, p2, p3, p4 = walls_coordinates[i:i + 4]
-        if intersect(x1, y1, x2, y2, p1, p2, p3, p4):
+    for wall in walls_coordinates:
+        if intersect(x1, y1, x2, y2, wall.x1, wall.y1, wall.x2, wall.y2):
             return True
     for door in doors:
-        # Handle both Door objects and tuples
-        if isinstance(door, Door):
-            if door.is_closed():
-                px1, py1, px2, py2 = door.x1, door.y1, door.x2, door.y2
-                if intersect(x1, y1, x2, y2, px1, py1, px2, py2):
-                    return True
-        else:
-            # door structure: (x1, y1, x2, y2, state)
-            if door[4] == "close":
-                px1, py1, px2, py2 = door[0], door[1], door[2], door[3]
-                if intersect(x1, y1, x2, y2, px1, py1, px2, py2):
-                    return True
+        if door.is_closed() and intersect(x1, y1, x2, y2, door.x1, door.y1, door.x2, door.y2):
+            return True
     return False
 
 def on_segment(x1, y1, x2, y2, x, y):
@@ -242,23 +200,14 @@ def intersect(x1, y1, x2, y2, x3, y3, x4, y4):
 def find_switch_sensors_by_doors(doors, sensors):
     results = []
     for door in doors:
-        # Handle both Door objects and tuples
-        if isinstance(door, Door):
-            x1, y1, x2, y2, state_p = door.x1, door.y1, door.x2, door.y2, door.state
-        else:
-            x1, y1, x2, y2, state_p = door
+        x1, y1, x2, y2, state_p = door.x1, door.y1, door.x2, door.y2, door.state
         
         center_x = (x1 + x2) / 2
         center_y = (y1 + y2) / 2
         associated_sensors = []
         for sensor in sensors:
-            # Handle both Sensor objects and tuples
-            if isinstance(sensor, Sensor):
-                is_switch = sensor.type == "Switch"
-                x, y = sensor.x, sensor.y
-            else:
-                is_switch = sensor[3] == "Switch"
-                x, y = sensor[1], sensor[2]
+            is_switch = sensor.type == "Switch"
+            x, y = sensor.x, sensor.y
             
             if is_switch and calculate_distance(center_x, center_y, x, y) < 50:
                 associated_sensors.append(sensor)
@@ -306,7 +255,19 @@ def update_devices_consumption(canvas, devices, delta_seconds, timer_app_instanc
     current_datetime = datetime.strptime(f"{current_date_str} {simulated_time_str}", "%Y-%m-%d %H:%M")
 
     for i in range(len(devices)):
-        name, dx, dy, type, power, state, min_c, max_c, current_cons, cons_dir = devices[i]
+        device = devices[i]
+        name, dx, dy, type, power, state, min_c, max_c, current_cons, cons_dir = (
+            device.name,
+            device.x,
+            device.y,
+            device.type,
+            device.power,
+            device.state,
+            device.min_consumption,
+            device.max_consumption,
+            device.current_consumption,
+            device.consumption_direction,
+        )
 
         if state == 1:
             if name in active_cycles:
@@ -319,7 +280,9 @@ def update_devices_consumption(canvas, devices, delta_seconds, timer_app_instanc
                 if elapsed_min > profile_duration:
                     if cycle_type not in ["Fridge", "Computer", "Oven"]:
                         # Turn off the device and close the cycle
-                        devices[i] = (name, dx, dy, type, power, 0, min_c, max_c, 0, 0)
+                        device.state = 0
+                        device.current_consumption = 0
+                        device.consumption_direction = 0
                         try:
                             del active_cycles[name]
                         except KeyError:
@@ -334,13 +297,13 @@ def update_devices_consumption(canvas, devices, delta_seconds, timer_app_instanc
                 current_consumption = get_device_consumption(
                     name, cycle_type, current_datetime, active_cycles, state
                 )
-                devices[i] = (name, dx, dy, type, power, state, min_c, max_c, current_consumption, cons_dir)
+                device.current_consumption = current_consumption
             else:
                 # Device turned on but without active cycle: use profile of its type
                 current_consumption = get_device_consumption(
                     name, type, current_datetime, active_cycles, state
                 )
-                devices[i] = (name, dx, dy, type, power, state, min_c, max_c, current_consumption, cons_dir)
+                device.current_consumption = current_consumption
         else:
             # if OFF, consumption is zero
-            devices[i] = (name, dx, dy, type, power, state, min_c, max_c, 0, cons_dir)
+            device.current_consumption = 0

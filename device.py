@@ -39,11 +39,11 @@ class DeviceDialog(simpledialog.Dialog):
             return False
         # avoid duplicates by considering both runtimes and file uploads
         for d in devices:
-            if isinstance(d, Device) and name == d.name:
+            if name == d.name:
                 messagebox.showwarning("Input not valid", "Device name already present.")
                 return False
         for d in device_file:
-            if isinstance(d, tuple) and name == d[0]:
+            if name == d.name:
                 messagebox.showwarning("Input not valid", "Device name already present.")
                 return False
         return True
@@ -79,7 +79,7 @@ def add_device(canvas, event, load_active):
         )
 
         if load_active:
-            device_file.append(device.tuple())
+            device_file.append(device)
         else:
             devices.append(device)
 
@@ -88,10 +88,7 @@ def add_device(canvas, event, load_active):
 
 
 def draw_device(canvas, device):
-    if isinstance(device, Device):
-        name, x, y, type, state = device.name, device.x, device.y, device.type, device.state
-    else:
-        name, x, y, type, power, state, *_ = device
+    name, x, y, type, state = device.name, device.x, device.y, device.type, device.state
     color = "red" if state == 0 else "green"
     canvas.create_oval(x - 5, y - 5, x + 5, y + 5, fill=color, tags=(name, 'device'))
     canvas.create_text(x+7, y, text=f"{name} ({type})", fill=color, anchor=tk.SW, tags=(name, 'device'))

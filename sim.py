@@ -124,20 +124,16 @@ def interaction(canvas, timer_app_instance, event, load_active, activity_label):
     # turn off previous active PIRs, but NOT the one you are about to activate
     if closest_sensor_pir:
         for sensor in active_pir_sensors:
-            # Handle both Sensor objects and tuples
-            sensor_name_curr = sensor.name if isinstance(sensor, Sensor) else sensor[0]
-            closest_name = closest_sensor_pir.name if isinstance(closest_sensor_pir, Sensor) else closest_sensor_pir[0]
+            sensor_name_curr = sensor.name
+            closest_name = closest_sensor_pir.name
             if sensor_name_curr == closest_name:
                 continue
             name, state, s_sensors = changePIR(canvas, sensor, s_sensors, 0)
             if name not in sensor_states:
                 sensor_states[name] = {'time': [], 'state': [], 'type': 'PIR'}
             append_unique_binary(sensor_states[name], timestamp, state, 'PIR')
-            try:
-                sx = int(sensor.x) if isinstance(sensor, Sensor) else int(sensor[1])
-                sy = int(sensor.y) if isinstance(sensor, Sensor) else int(sensor[2])
-            except Exception:
-                sx, sy = 0, 0
+            sx = int(sensor.x)
+            sy = int(sensor.y)
             log_sensor_event(timestamp, name, "PIR", sx, sy, 0, "auto-off-prev")  # [LOG]
 
     active_pir_sensors = []
@@ -150,19 +146,13 @@ def interaction(canvas, timer_app_instance, event, load_active, activity_label):
             sensor_states[name] = {'time': [], 'state': [], 'type': 'PIR'}
         append_unique_binary(sensor_states[name], timestamp, state, 'PIR')
         active_pir_sensors.append(closest_sensor_pir)
-        try:
-            sx = int(closest_sensor_pir.x) if isinstance(closest_sensor_pir, Sensor) else int(closest_sensor_pir[1])
-            sy = int(closest_sensor_pir.y) if isinstance(closest_sensor_pir, Sensor) else int(closest_sensor_pir[2])
-        except Exception:
-            sx, sy = 0, 0
+        sx = int(closest_sensor_pir.x)
+        sy = int(closest_sensor_pir.y)
         log_sensor_event(timestamp, name, "PIR", sx, sy, 1, "closest_in_fov")  # [LOG]
 
         # Activate device if the user clicks on it with a few tolerance pixels
         for device in d_devices:
-            if isinstance(device, Device):
-                dx, dy = device.x, device.y
-            else:
-                dev_name, dx, dy, type, power, dev_state, min_c, max_c, current_cons, cons_dir = device
+            dx, dy = device.x, device.y
             if abs(dx - x) <= 5 and abs(dy - y) <= 5:
                 toggle_device_state(canvas, event, sensor_states, load_active, timer_app_instance, x, y)
                 break
@@ -174,10 +164,10 @@ def interaction(canvas, timer_app_instance, event, load_active, activity_label):
 
     # Weight: activate sensor if clicked close (within 10 px) otherwise turn off
     for sensor in s_sensors:
-        sensor_type = sensor.type if isinstance(sensor, Sensor) else sensor[3]
+        sensor_type = sensor.type
         if sensor_type == "Weight":
-            sx = sensor.x if isinstance(sensor, Sensor) else sensor[1]
-            sy = sensor.y if isinstance(sensor, Sensor) else sensor[2]
+            sx = sensor.x
+            sy = sensor.y
             distance = calculate_distance(x, y, sx, sy)
             if distance < 10:
                 name, state, s_sensors = ChangeWeight(canvas, sensor, s_sensors, 1)
@@ -202,12 +192,9 @@ def interaction(canvas, timer_app_instance, event, load_active, activity_label):
             if sw_name not in sensor_states:
                 sensor_states[sw_name] = {'time': [], 'state': [], 'type': 'Switch'}
             append_unique_binary(sensor_states[sw_name], timestamp, int(sw_state), 'Switch')
-            try:
-                sx = int(sensor.x) if isinstance(sensor, Sensor) else int(sensor[1])
-                sy = int(sensor.y) if isinstance(sensor, Sensor) else int(sensor[2])
-            except Exception:
-                sx, sy = 0, 0
-            door_name = door.x1 if isinstance(door, Door) else door[0]
+            sx = int(sensor.x)
+            sy = int(sensor.y)
+            door_name = f"{door.x1},{door.y1}-{door.x2},{door.y2}"
             log_sensor_event(timestamp, sw_name, "Switch", sx, sy, int(sw_state), f"sync_with_door:{door_name}")  # [LOG]
             print(f"Interact with switch sensor: {sw_name}, State: {sw_state}, Door: {door_name}, Time: {simulated_time} - Date: {current_date}")
 
@@ -243,12 +230,8 @@ def toggle_device_state(canvas, event, sensor_states, load_active, timer_app_ins
     OVEN_DISTANCE_THRESHOLD = 50
 
     for i, device in enumerate(d_devices):
-        # Handle both Device objects and tuples
-        if isinstance(device, Device):
-            dev_name, dx, dy, type_d, power, dev_state, min_c, max_c = device.name, device.x, device.y, device.type, device.power, device.state, device.min_consumption, device.max_consumption
-            current_cons, cons_dir = device.current_consumption, device.consumption_direction
-        else:
-            dev_name, dx, dy, type_d, power, dev_state, min_c, max_c, current_cons, cons_dir = device
+        dev_name, dx, dy, type_d, power, dev_state, min_c, max_c = device.name, device.x, device.y, device.type, device.power, device.state, device.min_consumption, device.max_consumption
+        current_cons, cons_dir = device.current_consumption, device.consumption_direction
         
         if abs(dx - x) <= 5 and abs(dy - y) <= 5:
             new_state = 0 if dev_state == 1 else 1
@@ -263,13 +246,9 @@ def toggle_device_state(canvas, event, sensor_states, load_active, timer_app_ins
                 # Do not change current_cons for Fridge: continue the descent
 
             # Update device
-            if isinstance(device, Device):
-                device.state = new_state
-                device.current_consumption = current_cons
-                device.consumption_direction = cons_dir
-                d_devices[i] = device
-            else:
-                d_devices[i] = (dev_name, dx, dy, type_d, power, new_state, min_c, max_c, current_cons, cons_dir)
+            device.state = new_state
+            device.current_consumption = current_cons
+            device.consumption_direction = cons_dir
             
             canvas.itemconfig(dev_name, fill="red" if new_state == 0 else "green")
 
@@ -277,17 +256,17 @@ def toggle_device_state(canvas, event, sensor_states, load_active, timer_app_ins
             log_device_event(current_timestamp, dev_name, type_d, int(dx), int(dy), int(new_state), "user_toggle_at_click")  # [LOG]
 
             for sensor in s_sensors:
-                sensor_type = sensor.type if isinstance(sensor, Sensor) else sensor[3]
+                sensor_type = sensor.type
                 if sensor_type == "Temperature":
                     oven_active = False
-                    sensor_x = sensor.x if isinstance(sensor, Sensor) else sensor[1]
-                    sensor_y = sensor.y if isinstance(sensor, Sensor) else sensor[2]
+                    sensor_x = sensor.x
+                    sensor_y = sensor.y
                     for dev in d_devices:
-                        dev_type = dev.type if isinstance(dev, Device) else dev[3]
-                        dev_state = dev.state if isinstance(dev, Device) else dev[5]
+                        dev_type = dev.type
+                        dev_state = dev.state
                         if dev_type == "Oven" and dev_state == 1:
-                            device_x = dev.x if isinstance(dev, Device) else dev[1]
-                            device_y = dev.y if isinstance(dev, Device) else dev[2]
+                            device_x = dev.x
+                            device_y = dev.y
                             distance = ((sensor_x - device_x) ** 2 + (sensor_y - device_y) ** 2) ** 0.5
                             if distance <= OVEN_DISTANCE_THRESHOLD:
                                 oven_active = True
@@ -365,18 +344,18 @@ def update_sensors(canvas, timer_app_instance, load_active, activity_label, *, s
     # --- Temperature ---
     for i in range(len(s_sensors)):
         sensor = s_sensors[i]
-        sensor_type = sensor.type if isinstance(sensor, Sensor) else sensor[3]
+        sensor_type = sensor.type
         if sensor_type == "Temperature":
-            sensor_x = sensor.x if isinstance(sensor, Sensor) else sensor[1]
-            sensor_y = sensor.y if isinstance(sensor, Sensor) else sensor[2]
+            sensor_x = sensor.x
+            sensor_y = sensor.y
 
             oven_active = False
             for device in d_devices:
-                dev_type = device.type if isinstance(device, Device) else device[3]
-                dev_state = device.state if isinstance(device, Device) else device[5]
+                dev_type = device.type
+                dev_state = device.state
                 if dev_type == "Oven" and dev_state == 1:
-                    device_x = device.x if isinstance(device, Device) else device[1]
-                    device_y = device.y if isinstance(device, Device) else device[2]
+                    device_x = device.x
+                    device_y = device.y
                     dist = calculate_distance(sensor_x, sensor_y, device_x, device_y)
                     if dist <= OVEN_DISTANCE_THRESHOLD:
                         oven_active = True
@@ -392,14 +371,14 @@ def update_sensors(canvas, timer_app_instance, load_active, activity_label, *, s
     updated_smartmeters = set()
     for i in range(len(s_sensors)):
         sensor = s_sensors[i]
-        sensor_type = sensor.type if isinstance(sensor, Sensor) else sensor[3]
+        sensor_type = sensor.type
         if sensor_type == "Smart Meter":
             sensor_name, new_consumption, s_sensors = changeSmartMeter(
                 ui_canvas, sensor, s_sensors, d_devices, delta_seconds, current_datetime
             )
 
             sensor_type_name = "Smart Meter"
-            associated_device = sensor.associated_device if isinstance(sensor, Sensor) else sensor[10]
+            associated_device = sensor.associated_device
 
             if sensor_name not in sensor_states:
                 sensor_states[sensor_name] = {
@@ -417,8 +396,8 @@ def update_sensors(canvas, timer_app_instance, load_active, activity_label, *, s
             THRESHOLD_W = 1.0
             bin_state = 1 if (new_consumption or 0.0) > THRESHOLD_W else 0
 
-            sensor_x = sensor.x if isinstance(sensor, Sensor) else sensor[1]
-            sensor_y = sensor.y if isinstance(sensor, Sensor) else sensor[2]
+            sensor_x = sensor.x
+            sensor_y = sensor.y
 
             _append_unique_sample(
                 sensor_states[sensor_name],
@@ -450,16 +429,13 @@ def update_sensors(canvas, timer_app_instance, load_active, activity_label, *, s
 
     # snapshot device->smartmeter 
     for device in d_devices:
-        if isinstance(device, Device):
-            dev_name, dev_type, state, current_cons = device.name, device.type, device.state, device.current_consumption
-        else:
-            dev_name, _, _, dev_type, _, state, _, _, current_cons, _ = device
+        dev_name, dev_type, state, current_cons = device.name, device.type, device.state, device.current_consumption
         
         for sensor in s_sensors:
-            sensor_type = sensor.type if isinstance(sensor, Sensor) else sensor[3]
-            associated_dev = sensor.associated_device if isinstance(sensor, Sensor) else sensor[10]
+            sensor_type = sensor.type
+            associated_dev = sensor.associated_device
             if sensor_type == "Smart Meter" and associated_dev == dev_name:
-                sensor_name = sensor.name if isinstance(sensor, Sensor) else sensor[0]
+                sensor_name = sensor.name
                 if sensor_name in updated_smartmeters:
                     continue
 
@@ -477,8 +453,8 @@ def update_sensors(canvas, timer_app_instance, load_active, activity_label, *, s
                 THRESHOLD_W = 1.0
                 bin_state = 1 if (current_cons or 0.0) > THRESHOLD_W else 0
 
-                sensor_x = sensor.x if isinstance(sensor, Sensor) else sensor[1]
-                sensor_y = sensor.y if isinstance(sensor, Sensor) else sensor[2]
+                sensor_x = sensor.x
+                sensor_y = sensor.y
 
                 _append_unique_sample(
                     sensor_states[sensor_name],
@@ -503,15 +479,12 @@ def update_sensors(canvas, timer_app_instance, load_active, activity_label, *, s
 
     if do_sample and not fast:
         for sensor in s_sensors:
-            sensor_type = sensor.type if isinstance(sensor, Sensor) else sensor[3]
+            sensor_type = sensor.type
             if sensor_type in types_to_sample:
-                sensor_name = sensor.name if isinstance(sensor, Sensor) else sensor[0]
-                sx = int(sensor.x) if isinstance(sensor, Sensor) else int(sensor[1])
-                sy = int(sensor.y) if isinstance(sensor, Sensor) else int(sensor[2])
-                try:
-                    current_state = int(round(float(sensor.state if isinstance(sensor, Sensor) else sensor[7])))
-                except Exception:
-                    current_state = 0
+                sensor_name = sensor.name
+                sx = int(sensor.x)
+                sy = int(sensor.y)
+                current_state = int(round(float(sensor.state)))
 
                 if sensor_name not in sensor_states:
                     sensor_states[sensor_name] = {'time': [], 'state': [], 'type': sensor_type}

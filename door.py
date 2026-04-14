@@ -20,11 +20,7 @@ def draw_line_door(canvas, window, load_active):
         coord_point1 = None
         coord_point2 = None
         for p_point in point:
-            # Handle both Point objects and tuples
-            if isinstance(p_point, Point):
-                p_name, p_x, p_y = p_point.name, p_point.x, p_point.y
-            else:
-                p_name, p_x, p_y = p_point[0], p_point[1], p_point[2]
+            p_name, p_x, p_y = p_point.name, p_point.x, p_point.y
             
             if p_name == point1:
                 coord_point1 = (p_x, p_y)
@@ -32,8 +28,7 @@ def draw_line_door(canvas, window, load_active):
                 coord_point2 = (p_x, p_y)
 
         if coord_point1 and coord_point2:
-            state = "close"
-            door = (coord_point1[0], coord_point1[1], coord_point2[0], coord_point2[1], state)
+            door = Door(x1=coord_point1[0], y1=coord_point1[1], x2=coord_point2[0], y2=coord_point2[1], state="close")
             if load_active:
                 read_doors.append(door)
             else:
@@ -60,11 +55,10 @@ def draw_line_door(canvas, window, load_active):
 
 
 def draw_door(canvas, door):
-    x1, y1, x2, y2, state = door
-    if state == 'close':
-        canvas.create_line(x1, y1, x2, y2, fill="green", width=4, tags="door")
+    if door.state == 'close':
+        canvas.create_line(door.x1, door.y1, door.x2, door.y2, fill="green", width=4, tags="door")
     else:
-        canvas.create_line(x1, y1, x2, y2, fill="grey", width=4, dash=(4, 2), tags="door")
+        canvas.create_line(door.x1, door.y1, door.x2, door.y2, fill="grey", width=4, dash=(4, 2), tags="door")
 
 
 def draw_all_doors(canvas, doors):
@@ -80,17 +74,13 @@ def interaction_with_door(canvas, event, doors):
     tolerance = 5  # defines the maximum click distance from the door that can be tolerated.
 
     for index, door in enumerate(doors):
-        if len(door) == 5:  # check if door format is valid
-            x1, y1, x2, y2, state = door
-            if point_in_line(x, y, x1, y1, x2, y2, tolerance):
-                print(f"Interaction with door {index} at coordinates ({x1}, {y1}), ({x2}, {y2}) with state {state}")
+        if point_in_line(x, y, door.x1, door.y1, door.x2, door.y2, tolerance):
+            print(f"Interaction with door {index} at coordinates ({door.x1}, {door.y1}), ({door.x2}, {door.y2}) with state {door.state}")
 
-                # change the door state
-                toggle_door_state(index, doors)
-                draw_all_doors(canvas, doors)
-                break
-        else:
-            print(f"Door format not valid: {door}")
+            # change the door state
+            toggle_door_state(index, doors)
+            draw_all_doors(canvas, doors)
+            break
 
 def point_in_line(px, py, x1, y1, x2, y2, tolerance):
     line_mag = ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5
@@ -106,9 +96,9 @@ def point_in_line(px, py, x1, y1, x2, y2, tolerance):
 
 def toggle_door_state(index, doors):
     if 0 <= index < len(doors):  # check if index is valid
-        x1, y1, x2, y2, state = doors[index]
-        new_state = 'open' if state == 'close' else 'close'
-        print(f"Toggled door {index} state from {state} to {new_state}")
-        doors[index] = (x1, y1, x2, y2, new_state)
+        door = doors[index]
+        new_state = 'open' if door.state == 'close' else 'close'
+        print(f"Toggled door {index} state from {door.state} to {new_state}")
+        door.state = new_state
     else:
         print(f"Door index not valid: {index}")
