@@ -17,8 +17,6 @@ def _is_real_temperature_sensor(sensor_name: str, logs_dir: str = "devices") -> 
     We detect it by:
       1) Trying label-based CSV lookup (sensor_name).
       2) Falling back to sensor_map.json -> gpio lookup.
-
-    This function is intentionally lightweight and cached.
     """
     if not sensor_name:
         return False
@@ -241,13 +239,15 @@ def update_temperature_sensor_color(canvas, name: str, *, changing: bool) -> Non
     canvas.itemconfig(rect_tag, fill=color)
     canvas.itemconfig(text_tag, fill=color)
 
-def update_devices_consumption(canvas, devices, delta_seconds, timer_app_instance=None):
+def update_devices_consumption(canvas, devices, delta_seconds, timer_app_instance=None, active_cycles_store=None):
     if timer_app_instance is None:
         print("Timer not provided to update_devices_consumption.")
         return
 
-    from common import active_cycles
     from datetime import datetime
+
+    if not isinstance(active_cycles_store, dict):
+        active_cycles_store = {}
 
     # Rebuild simulated datetime
     simulated_time_str = timer_app_instance.get_simulated_time()
@@ -270,8 +270,8 @@ def update_devices_consumption(canvas, devices, delta_seconds, timer_app_instanc
         )
 
         if state == 1:
-            if name in active_cycles:
-                start_time, cycle_type = active_cycles[name]
+            if name in active_cycles_store:
+                start_time, cycle_type = active_cycles_store[name]
                 elapsed_min = (current_datetime - start_time).total_seconds() / 60.0
                 profile_duration = max(consumption_profiles[cycle_type]["profile"].keys())
 
@@ -284,7 +284,7 @@ def update_devices_consumption(canvas, devices, delta_seconds, timer_app_instanc
                         device.current_consumption = 0
                         device.consumption_direction = 0
                         try:
-                            del active_cycles[name]
+                            del active_cycles_store[name]
                         except KeyError:
                             pass
                         if canvas is not None:
@@ -295,13 +295,13 @@ def update_devices_consumption(canvas, devices, delta_seconds, timer_app_instanc
 
                 # Calculate consumption
                 current_consumption = get_device_consumption(
-                    name, cycle_type, current_datetime, active_cycles, state
+                    name, cycle_type, current_datetime, active_cycles_store, state
                 )
                 device.current_consumption = current_consumption
             else:
                 # Device turned on but without active cycle: use profile of its type
                 current_consumption = get_device_consumption(
-                    name, type, current_datetime, active_cycles, state
+                    name, type, current_datetime, active_cycles_store, state
                 )
                 device.current_consumption = current_consumption
         else:

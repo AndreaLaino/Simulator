@@ -12,7 +12,6 @@ from sensor import add_sensor
 from wall import draw_line_window
 from graph import show_graphs
 from automatic import launch_automatic_interface
-from common import sensor_states
 
 from app.context import AppContext
 from app.controllers.simulation import start_sim, enable_all_menus, exit_app
@@ -28,6 +27,20 @@ from app.io.scenario import (
 )
 from app.ui.bindings import open_bind_ip_ui, open_bind_dht_ui
 from app.controllers.llm_smartmeter import open_llm_smartmeter_ui
+
+
+def _sensor_store(ctx: AppContext) -> dict:
+    return ctx.house_state.sensor_states()
+
+
+def _activity_log_store(ctx: AppContext) -> dict:
+    return ctx.house_state.values.setdefault(
+        "activity_log_state",
+        {
+            "activity_log": [],
+            "active_activities": {},
+        },
+    )
 
 
 def _load_image(canvas_obj: tk.Canvas, file_path: str):
@@ -156,16 +169,16 @@ def build_home_ui(ctx: AppContext):
     sim_menu.add_command(label="Manual", command=lambda: start_sim(ctx))
     sim_menu.add_command(label="LLM Smart Meter", command=lambda: open_llm_smartmeter_ui(ctx))
     sim_menu.add_separator()
-    sim_menu.add_command(label="Generate log", command=lambda: __import__("log").show_log(ctx.canvas, sensor_states, ctx.load_active))
-    sim_menu.add_command(label="Activity Log", command=lambda: __import__("log").show_activity_log())
-    sim_menu.add_command(label="Generate graphs", command=lambda: __import__("graph").show_graphs(ctx.canvas, sensor_states))
+    sim_menu.add_command(label="Generate log", command=lambda: __import__("log").show_log(ctx.canvas, _sensor_store(ctx), ctx.load_active, _activity_log_store(ctx)))
+    sim_menu.add_command(label="Activity Log", command=lambda: __import__("log").show_activity_log(_activity_log_store(ctx)))
+    sim_menu.add_command(label="Generate graphs", command=lambda: __import__("graph").show_graphs(ctx.canvas, _sensor_store(ctx)))
     sim_menu.add_separator()
     sim_menu.add_command(label="Import sensor CSV from S3", command=lambda: import_csv_from_s3(ctx.window))
     sim_menu.add_command(label="Import sensor CSV (local)", command=lambda: import_csv(ctx.window))
     sim_menu.add_command(label="Export simulations (CSV)", command=lambda: export_simulation_csv())
     sim_menu.add_separator()
-    sim_menu.add_command(label="Bind Smart Meter (IP → sensor)", command=lambda: open_bind_ip_ui(ctx.window, sensor_states))
-    sim_menu.add_command(label="Bind DHT22 (GPIO → sensor)", command=lambda: open_bind_dht_ui(ctx.window, sensor_states))
+    sim_menu.add_command(label="Bind Smart Meter (IP → sensor)", command=lambda: open_bind_ip_ui(ctx.window, _sensor_store(ctx)))
+    sim_menu.add_command(label="Bind DHT22 (GPIO → sensor)", command=lambda: open_bind_dht_ui(ctx.window, _sensor_store(ctx)))
 
 
 

@@ -1,7 +1,8 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
 import tkinter as tk
-from typing import Optional, Tuple, List
+from typing import Optional
+from house_state import HouseState
 
 @dataclass
 class AppContext:
@@ -27,3 +28,5 @@ class AppContext:
 
     # Optional reference if you need to stop a background logger on exit
     smart_logger: Optional[object] = None
+    house_state: HouseState = field(default_factory=HouseState)
+    automatic_state: dict = field(default_factory=dict)

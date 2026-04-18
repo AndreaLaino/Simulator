@@ -61,43 +61,31 @@ class ScrollableArea:
         self.canvas.update_idletasks()
         self._on_configure()
 
-selected_folder_path = None
-files_in_folder = []          #  for folder mode
-file_list_var = None
-file_listbox = None
-
-graph_canvas_frame = None
-graph_area_obj = None         # ScrollableArea instance to update scrollregion
-
-# User path mode
-interactions_df = None
-sensors_in_csv = []
-sensors_list_var = None
-sensors_listbox = None
-interactions_path = None
-
-SAVE_LAST_DIR = None    # remembers the last export directory across saves.
+def _auto_state(ctx: AppContext) -> dict:
+    return ctx.automatic_state
 
 # folder mode
 # Ask a folder and list supported data files (txt/csv/tsv) for Folder mode.
-def select_folder():
-    global selected_folder_path, files_in_folder, file_list_var
+def select_folder(ctx: AppContext):
+    state = _auto_state(ctx)
 
     folder_path = filedialog.askdirectory(title="Select the folder with the data files")
     if not folder_path:
         return
-    selected_folder_path = folder_path
+    state["selected_folder_path"] = folder_path
 
     supported_extensions = (".txt", ".csv", ".tsv")
-    files_in_folder = []
+    state["files_in_folder"] = []
     display_list = []
     for f in os.listdir(folder_path):
         full_path = os.path.join(folder_path, f)
         if os.path.isfile(full_path) and f.lower().endswith(supported_extensions):
-            files_in_folder.append(f)
+            state["files_in_folder"].append(f)
             display_list.append("• " + f)
 
-    file_list_var.set(display_list)
+    file_list_var = state.get("file_list_var")
+    if file_list_var is not None:
+        file_list_var.set(display_list)
     #messagebox.showinfo("Selected folder", f"You have chosen:\n{folder_path}\nFiles found:\n{files_in_folder}")
 
 def read_timestamp_state_file(file_path: str):
@@ -114,23 +102,27 @@ def read_timestamp_state_file(file_path: str):
     state_list = pd.to_numeric(df["state"], errors="coerce").tolist()
     return time_str_list, state_list
 
-def clear_plot_area():
+def clear_plot_area(ctx: AppContext):
     # Cleans the graphics area in the scroll frame.
-    global graph_area_obj
-    if graph_canvas_frame is None:
+    state = _auto_state(ctx)
+    graph_canvas = state.get("graph_canvas_frame")
+    if graph_canvas is None:
         return
-    for w in graph_canvas_frame.winfo_children():
+    for w in graph_canvas.winfo_children():
         w.destroy()
-    if graph_area_obj is not None:
-        graph_area_obj.update_scrollregion()
+    graph_area_obj_local = state.get("graph_area_obj")
+    if graph_area_obj_local is not None:
+        graph_area_obj_local.update_scrollregion()
 
-def generate_graphs():
-    global selected_folder_path
+def generate_graphs(ctx: AppContext):
+    state = _auto_state(ctx)
+    selected_folder_path = state.get("selected_folder_path")
     if not selected_folder_path:
         messagebox.showerror("Error", "No folder selected.")
         return
 
-    selected_indices = file_listbox.curselection()
+    file_listbox = state.get("file_listbox")
+    selected_indices = file_listbox.curselection() if file_listbox is not None else ()
     if not selected_indices:
         messagebox.showerror("Error", "No file selected from the list.")
         return
@@ -140,7 +132,7 @@ def generate_graphs():
     selected_keys = []
 
     for idx in selected_indices:
-        file_name = files_in_folder[idx]
+        file_name = state.get("files_in_folder", [])[idx]
         file_path = os.path.join(selected_folder_path, file_name)
         sensor_name = os.path.splitext(file_name)[0]
         try:
@@ -166,46 +158,48 @@ def generate_graphs():
         messagebox.showerror("Error", msg)
         return
 
-    clear_plot_area()
+    clear_plot_area(ctx)
     try:
         show_graphs_auto(
             sensor_states=sensor_states,
             selected_keys=selected_keys,
-            target_frame=graph_canvas_frame
+            target_frame=state.get("graph_canvas_frame")
         )
 
-        if graph_area_obj is not None:
-            graph_area_obj.update_scrollregion()
+        graph_area_obj_local = state.get("graph_area_obj")
+        if graph_area_obj_local is not None:
+            graph_area_obj_local.update_scrollregion()
     except Exception as e:
         messagebox.showerror("Error", f"Unable to generate graphs:\n{e}")
 
-def clear_all():
+def clear_all(ctx: AppContext):
     # cleans graphs and resets selections (both modes)
-    global selected_folder_path, files_in_folder, file_list_var
-    global interactions_df, sensors_in_csv, sensors_list_var, interactions_path
+    state = _auto_state(ctx)
 
-    clear_plot_area()
+    clear_plot_area(ctx)
 
     # reset folder mode
-    if file_list_var:
+    file_list_var = state.get("file_list_var")
+    if file_list_var is not None:
         file_list_var.set([])
-    selected_folder_path = None
-    files_in_folder = []
+    state["selected_folder_path"] = None
+    state["files_in_folder"] = []
 
     # reset user path mode
-    if sensors_list_var:
+    sensors_list_var = state.get("sensors_list_var")
+    if sensors_list_var is not None:
         sensors_list_var.set([])
-    sensors_in_csv = []
-    interactions_df = None
-    interactions_path = None
+    state["sensors_in_csv"] = []
+    state["interactions_df"] = None
+    state["interactions_path"] = None
 
     messagebox.showinfo("Reset", "Graphs and selections deleted.")
 
 
 # user path mode
 # Load path; require columns {timestamp_sim,event_type,subject,name,x,y,value,extra}.
-def select_path_csv():
-    global interactions_df, sensors_in_csv, sensors_list_var, interactions_path
+def select_path_csv(ctx: AppContext):
+    state = _auto_state(ctx)
 
     path = filedialog.askopenfilename(
         title="Select file",
@@ -231,33 +225,35 @@ def select_path_csv():
         messagebox.showerror("Error", f"timestamp_sim conversion error:\n{e}")
         return
 
-    interactions_df = df.sort_values("timestamp_sim").reset_index(drop=True)
-    interactions_path = path
+    state["interactions_df"] = df.sort_values("timestamp_sim").reset_index(drop=True)
+    state["interactions_path"] = path
 
     # extract sensors (event_type = sensor)
-    sensor_rows = interactions_df[interactions_df["event_type"] == "sensor"].copy()
+    sensor_rows = state["interactions_df"][state["interactions_df"]["event_type"] == "sensor"].copy()
     sensors = sensor_rows[["subject", "name"]].drop_duplicates().values.tolist()
-    sensors_in_csv = [(subj, name) for subj, name in sensors]
+    state["sensors_in_csv"] = [(subj, name) for subj, name in sensors]
 
-    display = [f"• {subj} — {name}" for subj, name in sensors_in_csv]
-    sensors_list_var.set(display)
+    display = [f"• {subj} — {name}" for subj, name in state["sensors_in_csv"]]
+    sensors_list_var = state.get("sensors_list_var")
+    if sensors_list_var is not None:
+        sensors_list_var.set(display)
 
-    messagebox.showinfo("CSV loaded", f"{os.path.basename(path)}\nSensors found: {len(sensors_in_csv)}")
+    messagebox.showinfo("CSV loaded", f"{os.path.basename(path)}\nSensors found: {len(state['sensors_in_csv'])}")
 
 # Build series per sensor; stable sort; aggregate by minute:
 # Smart Meter -> MAX; others -> last event per minute.
-def build_sensor_states_from_interactions(selected_indices):
-    global interactions_df, sensors_in_csv
+def build_sensor_states_from_interactions(ctx: AppContext, selected_indices):
+    state = _auto_state(ctx)
     sensor_states = {}
     selected_keys = []
 
     for idx in selected_indices:
-        subj, name = sensors_in_csv[idx]
+        subj, name = state["sensors_in_csv"][idx]
 
-        sub = interactions_df[
-            (interactions_df["event_type"] == "sensor")
-            & (interactions_df["subject"] == subj)
-            & (interactions_df["name"] == name)
+        sub = state["interactions_df"][
+            (state["interactions_df"]["event_type"] == "sensor")
+            & (state["interactions_df"]["subject"] == subj)
+            & (state["interactions_df"]["name"] == name)
         ][["timestamp_sim", "value"]].copy()
 
         if sub.empty:
@@ -288,55 +284,59 @@ def build_sensor_states_from_interactions(selected_indices):
 
     return sensor_states, selected_keys
 
-def generate_graphs_from_csv():
-    if interactions_df is None:
+def generate_graphs_from_csv_ctx(ctx: AppContext):
+    state = _auto_state(ctx)
+    if state.get("interactions_df") is None:
         messagebox.showerror("Error", "Load a simulation log first.")
         return
 
-    selected_indices = sensors_listbox.curselection()
+    sensors_listbox = state.get("sensors_listbox")
+    selected_indices = sensors_listbox.curselection() if sensors_listbox is not None else ()
     if not selected_indices:
         messagebox.showerror("Error", "Select at least one sensor in the list.")
         return
 
-    sensor_states, selected_keys = build_sensor_states_from_interactions(selected_indices)
+    sensor_states, selected_keys = build_sensor_states_from_interactions(ctx, selected_indices)
     if not sensor_states:
         messagebox.showerror("Error", "No valid data for the selected sensors.")
         return
 
-    clear_plot_area()
+    clear_plot_area(ctx)
     try:
         show_graphs_auto(
             sensor_states=sensor_states,
             selected_keys=selected_keys,
-            target_frame=graph_canvas_frame
+            target_frame=state.get("graph_canvas_frame")
         )
 
+        graph_area_obj = state.get("graph_area_obj")
         if graph_area_obj is not None:
             graph_area_obj.update_scrollregion()
     except Exception as e:
         messagebox.showerror("Error", f"Cannot generate graphs:\n{e}")
 
 
-def export_logs_from_csv():
-    global sensors_in_csv, sensors_listbox, interactions_df, SAVE_LAST_DIR
-    if interactions_df is None:
+def export_logs_from_csv_ctx(ctx: AppContext):
+    state = _auto_state(ctx)
+    if state.get("interactions_df") is None:
         messagebox.showerror("Error", "Load a simulation log first.")
         return
 
-    selected_indices = sensors_listbox.curselection()
+    sensors_listbox = state.get("sensors_listbox")
+    selected_indices = sensors_listbox.curselection() if sensors_listbox is not None else ()
     if not selected_indices:
         messagebox.showerror("Error", "Select at least one sensor.")
         return
 
     exported, skipped = 0, 0
-    last_dir = SAVE_LAST_DIR or os.path.expanduser("~")
+    last_dir = state.get("SAVE_LAST_DIR") or os.path.expanduser("~")
 
     for idx in selected_indices:
-        subj, name = sensors_in_csv[idx]
-        sub = interactions_df[
-            (interactions_df["event_type"] == "sensor")
-            & (interactions_df["subject"] == subj)
-            & (interactions_df["name"] == name)
+        subj, name = state["sensors_in_csv"][idx]
+        sub = state["interactions_df"][
+            (state["interactions_df"]["event_type"] == "sensor")
+            & (state["interactions_df"]["subject"] == subj)
+            & (state["interactions_df"]["name"] == name)
         ][["timestamp_sim", "value"]].copy()
         if sub.empty:
             skipped += 1
@@ -378,7 +378,7 @@ def export_logs_from_csv():
             continue
 
         last_dir = os.path.dirname(out_path)
-        SAVE_LAST_DIR = last_dir
+        state["SAVE_LAST_DIR"] = last_dir
 
         # Write the file
         try:
@@ -398,11 +398,8 @@ def launch_automatic_interface(ctx: AppContext):
     """ Two-mode interface via tab (ttk.Notebook):
       - Tab 1: Folder with file (timestamp, status)
       - Tab 2: User path """
-    global file_list_var, file_listbox
-    global sensors_list_var, sensors_listbox
-    global graph_canvas_frame, graph_area_obj  # point to the frame of the active TAB
-
     window = ctx.window
+    state = _auto_state(ctx)
 
     if getattr(ctx, "home_frame", None) is not None:
         ctx.home_frame.pack_forget()
@@ -433,9 +430,9 @@ def launch_automatic_interface(ctx: AppContext):
     button_frame_a = tk.Frame(section_a)
     button_frame_a.pack(pady=5)
 
-    tk.Button(button_frame_a, text="Select folder", command=select_folder, width=20).grid(row=0, column=0, padx=5, pady=5)
-    tk.Button(button_frame_a, text="Generate graphs", command=generate_graphs, width=20).grid(row=0, column=1, padx=5, pady=5)
-    tk.Button(button_frame_a, text="Delete", command=clear_all, width=20, bg="#f44336", fg="white").grid(row=0, column=2, padx=5, pady=5)
+    tk.Button(button_frame_a, text="Select folder", command=lambda: select_folder(ctx), width=20).grid(row=0, column=0, padx=5, pady=5)
+    tk.Button(button_frame_a, text="Generate graphs", command=lambda: generate_graphs(ctx), width=20).grid(row=0, column=1, padx=5, pady=5)
+    tk.Button(button_frame_a, text="Delete", command=lambda: clear_all(ctx), width=20, bg="#f44336", fg="white").grid(row=0, column=2, padx=5, pady=5)
 
     listbox_frame = tk.Frame(section_a)
     listbox_frame.pack(pady=5, fill=tk.BOTH)
@@ -447,6 +444,8 @@ def launch_automatic_interface(ctx: AppContext):
     file_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
     tk.Scrollbar(listbox_frame, orient=tk.VERTICAL, command=file_listbox.yview).pack(side=tk.RIGHT, fill=tk.Y)
     file_listbox.config(yscrollcommand=listbox_frame.winfo_children()[-1].set)
+    state["file_list_var"] = file_list_var
+    state["file_listbox"] = file_listbox
 
     graph_wrap1 = tk.LabelFrame(tab1, text="Graphs", padx=8, pady=8)
     graph_wrap1.pack(fill=tk.BOTH, expand=True)
@@ -466,10 +465,10 @@ def launch_automatic_interface(ctx: AppContext):
     button_frame_b = tk.Frame(section_b)
     button_frame_b.pack(pady=5)
 
-    tk.Button(button_frame_b, text="Select file", command=select_path_csv, width=20).grid(row=0, column=0, padx=5, pady=5)
-    tk.Button(button_frame_b, text="Graphs from CSV", command=generate_graphs_from_csv, width=20).grid(row=0, column=1, padx=5, pady=5)
-    tk.Button(button_frame_b, text="Export log from CSV", command=export_logs_from_csv, width=20).grid(row=0, column=2, padx=5, pady=5)
-    tk.Button(button_frame_b, text="Delete", command=clear_all, width=20, bg="#f44336", fg="white").grid(row=0, column=3, padx=5, pady=5)
+    tk.Button(button_frame_b, text="Select file", command=lambda: select_path_csv(ctx), width=20).grid(row=0, column=0, padx=5, pady=5)
+    tk.Button(button_frame_b, text="Graphs from CSV", command=lambda: generate_graphs_from_csv_ctx(ctx), width=20).grid(row=0, column=1, padx=5, pady=5)
+    tk.Button(button_frame_b, text="Export log from CSV", command=lambda: export_logs_from_csv_ctx(ctx), width=20).grid(row=0, column=2, padx=5, pady=5)
+    tk.Button(button_frame_b, text="Delete", command=lambda: clear_all(ctx), width=20, bg="#f44336", fg="white").grid(row=0, column=3, padx=5, pady=5)
 
     sensors_list_frame = tk.Frame(section_b)
     sensors_list_frame.pack(pady=5, fill=tk.BOTH)
@@ -481,6 +480,8 @@ def launch_automatic_interface(ctx: AppContext):
     sensors_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
     tk.Scrollbar(sensors_list_frame, orient=tk.VERTICAL, command=sensors_listbox.yview).pack(side=tk.RIGHT, fill=tk.Y)
     sensors_listbox.config(yscrollcommand=sensors_list_frame.winfo_children()[-1].set)
+    state["sensors_list_var"] = sensors_list_var
+    state["sensors_listbox"] = sensors_listbox
 
     graph_wrap2 = tk.LabelFrame(tab2, text="Graphs", padx=8, pady=8)
     graph_wrap2.pack(fill=tk.BOTH, expand=True)
@@ -516,20 +517,16 @@ def launch_automatic_interface(ctx: AppContext):
     ).pack(side=tk.RIGHT, padx=6)
 
     # default tab 1 (folder)
-    graph_canvas_frame = graph_canvas_frame_tab1
-    graph_area_obj = area1
+    state["graph_canvas_frame"] = graph_canvas_frame_tab1
+    state["graph_area_obj"] = area1
 
     def on_tab_change(_event=None):
-        nonlocal graph_canvas_frame_tab1, graph_canvas_frame_tab2
-        nonlocal area1, area2
         current = nb.index(nb.select())
         if current == 0:
-            graph_canvas_frame = graph_canvas_frame_tab1
-            graph_area_obj = area1
+            state["graph_canvas_frame"] = graph_canvas_frame_tab1
+            state["graph_area_obj"] = area1
         else:
-            graph_canvas_frame = graph_canvas_frame_tab2
-            graph_area_obj = area2
-        globals()["graph_canvas_frame"] = graph_canvas_frame
-        globals()["graph_area_obj"] = graph_area_obj
+            state["graph_canvas_frame"] = graph_canvas_frame_tab2
+            state["graph_area_obj"] = area2
 
     nb.bind("<<NotebookTabChanged>>", on_tab_change)

@@ -67,7 +67,7 @@ def draw_all_doors(canvas, doors):
         draw_door(canvas, door)
 
 
-def interaction_with_door(canvas, event, doors):
+def interaction_with_door(canvas, event, doors, *, render=True):
     x = canvas.canvasx(event.x)
     y = canvas.canvasy(event.y)
 
@@ -79,8 +79,11 @@ def interaction_with_door(canvas, event, doors):
 
             # change the door state
             toggle_door_state(index, doors)
-            draw_all_doors(canvas, doors)
-            break
+            if render:
+                draw_all_doors(canvas, doors)
+            return True
+
+    return False
 
 def point_in_line(px, py, x1, y1, x2, y2, tolerance):
     line_mag = ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5

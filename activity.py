@@ -1,66 +1,69 @@
 import re
 
-from common import sensor_states
-from device import devices
 from door import doors
 from log import log_activity_start, log_activity_end, log_end_of_simulation
-from point import points
-from read import coordinates, read_devices, read_sensors, read_walls_coordinates, read_doors
-from sensor import sensors
+from house_state import HouseState
 from utils import find_closest_sensor_within_fov
 from wall import walls_coordinates
 
 FOV_ANGLE = 60  # degrees for PIR field-of-view checks
 RADIUS_STANDARD = 150   # px distance for "closest sensor within FOV"
-
-activity_sessions = {}
-current_activities = {}
-
-exit_triggered = False
-exit_time = 0
-prev_entry_state = None # previous state of the input switch to detect fronts
-
-
-meal_detection_start = {
-    "breakfast": None,
-    "lunch": None,
-    "dinner": None
-}
-meal_active = None
 MEAL_MIN_DURATION = 10  # simulated seconds to confirm meal
 SLEEP_MIN_DURATION = 10  # simulated seconds with Weight=1 near bed
-sleep_weight_start = {}  # sleep_weight_start: timers per Weight sensor near bed
-# index of the last edge 1->0 already managed for the "entrance" switch
-exit_last_edge_idx = -1
 
 
-def monitor_activities(canvas, load_active, activity_label, timer_app_instance):
-    if load_active:
-        p_points = coordinates
-        d_devices = read_devices
-        s_sensors = read_sensors
-        walls = read_walls_coordinates
-        d_doors = read_doors
-    else:
-        p_points = points
-        d_devices = devices
-        s_sensors = sensors
-        walls = walls_coordinates
-        d_doors = doors
+def _activity_state(house_state: HouseState) -> dict:
+    state = house_state.activity_state()
+    state.setdefault("activity_sessions", {})
+    state.setdefault("current_activities", {})
+    state.setdefault("exit_triggered", False)
+    state.setdefault("exit_time", None)
+    state.setdefault("exit_activated", False)
+    state.setdefault("prev_entry_state", None)
+    state.setdefault(
+        "meal_detection_start",
+        {
+            "breakfast": None,
+            "lunch": None,
+            "dinner": None,
+        },
+    )
+    state.setdefault("meal_active", None)
+    state.setdefault("sleep_weight_start", {})
+    state.setdefault("exit_last_edge_idx", -1)
+    return state
+
+
+def _activity_log_state(house_state: HouseState) -> dict:
+    state = house_state.activity_log_state()
+    state.setdefault("activity_log", [])
+    state.setdefault("active_activities", {})
+    return state
+
+
+def monitor_activities(canvas, activity_label, timer_app_instance, sensor_states_store, house_state: HouseState, runtime_sources: dict):
+    state = _activity_state(house_state)
+    log_state = _activity_log_state(house_state)
+
+    p_points = runtime_sources["points"]
+    d_devices = runtime_sources["devices"]
+    s_sensors = runtime_sources["sensors"]
+    walls = runtime_sources["walls"]
+    d_doors = runtime_sources["doors"]
 
     if timer_app_instance.is_running:
         now = timer_app_instance.get_simulated_time()
         detected = set()
 
         detectors = [
-            lambda: detect_exiting_home(sensor_states, s_sensors, timer_app_instance),
-            lambda: detect_entering_home(sensor_states, s_sensors, timer_app_instance, activity_label),
-            lambda: detect_sleeping(sensor_states, s_sensors, p_points, timer_app_instance),
-            lambda: detect_cooking(sensor_states, d_devices, s_sensors, walls, d_doors),
-            lambda: detect_meal(sensor_states, s_sensors, d_devices, timer_app_instance),
-            lambda: detect_laundry(sensor_states, d_devices),
-            lambda: detect_dishwasher(sensor_states, d_devices),
-            lambda: detect_office(sensor_states, d_devices),
+            lambda: detect_exiting_home(sensor_states_store, s_sensors, timer_app_instance, state),
+            lambda: detect_entering_home(sensor_states_store, s_sensors, timer_app_instance, activity_label, state),
+            lambda: detect_sleeping(sensor_states_store, s_sensors, p_points, timer_app_instance, state),
+            lambda: detect_cooking(sensor_states_store, d_devices, s_sensors, walls, d_doors),
+            lambda: detect_meal(sensor_states_store, s_sensors, d_devices, p_points, timer_app_instance, state),
+            lambda: detect_laundry(sensor_states_store, d_devices),
+            lambda: detect_dishwasher(sensor_states_store, d_devices),
+            lambda: detect_office(sensor_states_store, d_devices),
         ]
 
         for detect in detectors:
@@ -68,23 +71,24 @@ def monitor_activities(canvas, load_active, activity_label, timer_app_instance):
             if act:
                 detected.add(act)
 
-        update_activity_state(now, detected, activity_label)
+        update_activity_state(now, detected, activity_label, state, log_state)
 
-        canvas.after(1000, monitor_activities, canvas, load_active, activity_label, timer_app_instance)
+        canvas.after(1000, monitor_activities, canvas, activity_label, timer_app_instance, sensor_states_store, house_state, runtime_sources)
 
-def update_activity_state(current_time, detected_activities, activity_label):
-    global current_activities, activity_sessions
+def update_activity_state(current_time, detected_activities, activity_label, state: dict, log_state: dict):
+    current_activities = state["current_activities"]
+    activity_sessions = state["activity_sessions"]
 
     for act in detected_activities:
         if act not in current_activities:
             current_activities[act] = current_time
-            log_activity_start(act, current_time)
+            log_activity_start(act, current_time, log_state)
 
     ended = [act for act in current_activities if act not in detected_activities]
     for act in ended:
         start = current_activities.pop(act)
         activity_sessions.setdefault(act, []).append({"start": start, "end": current_time})
-        log_activity_end(act, current_time)
+        log_activity_end(act, current_time, log_state)
 
     # update activity label
     active = list(current_activities.keys())
@@ -94,20 +98,29 @@ def update_activity_state(current_time, detected_activities, activity_label):
         else:
             activity_label.config(text="Activity: None")
 
-def close_current_activity(timer_app_instance, activity_label=None):
-    global current_activities, activity_sessions
+def close_current_activity(timer_app_instance, activity_label=None, house_state: HouseState | None = None):
+    state = _activity_state(house_state) if house_state is not None else {
+        "current_activities": {},
+        "activity_sessions": {},
+    }
+    log_state = _activity_log_state(house_state) if house_state is not None else {
+        "activity_log": [],
+        "active_activities": {},
+    }
+    current_activities = state["current_activities"]
+    activity_sessions = state["activity_sessions"]
 
     now = timer_app_instance.get_simulated_time()
 
     for act, start in list(current_activities.items()):
         activity_sessions.setdefault(act, []).append({"start": start, "end": now})
-        log_activity_end(act, now)
+        log_activity_end(act, now, log_state)
     current_activities.clear()
 
     if activity_label:
         activity_label.config(text="Activity: None")
 
-    log_end_of_simulation(now)
+    log_end_of_simulation(now, log_state)
 
 
 def detect_cooking(sensor_states, devices, sensors, walls, doors):
@@ -154,18 +167,11 @@ def detect_office(sensor_states, devices):
                         return "office"
     return None
 
-def detect_exiting_home(sensor_states, sensors, timer_app_instance):
-    global exit_triggered, exit_time, exit_activated, exit_last_edge_idx
-
-    # intialization
-    if 'exit_activated' not in globals():
-        exit_activated = False
-    if 'exit_triggered' not in globals():
-        exit_triggered = False
-    if 'exit_time' not in globals():
-        exit_time = None
-    if 'exit_last_edge_idx' not in globals():
-        exit_last_edge_idx = -1
+def detect_exiting_home(sensor_states, sensors, timer_app_instance, state: dict):
+    exit_triggered = bool(state.get("exit_triggered", False))
+    exit_time = state.get("exit_time")
+    exit_activated = bool(state.get("exit_activated", False))
+    exit_last_edge_idx = int(state.get("exit_last_edge_idx", -1))
 
     now = timer_app_instance.get_simulated_time()
 
@@ -206,32 +212,37 @@ def detect_exiting_home(sensor_states, sensors, timer_app_instance):
                         break
             if all_zero:
                 exit_activated = True
+                state["exit_triggered"] = exit_triggered
+                state["exit_time"] = exit_time
+                state["exit_activated"] = exit_activated
+                state["exit_last_edge_idx"] = exit_last_edge_idx
                 return "Leaving home"
 
     # If already out, keep reporting activity
     if exit_activated:
+        state["exit_triggered"] = exit_triggered
+        state["exit_time"] = exit_time
+        state["exit_activated"] = exit_activated
+        state["exit_last_edge_idx"] = exit_last_edge_idx
         return "Leaving home"
 
+    state["exit_triggered"] = exit_triggered
+    state["exit_time"] = exit_time
+    state["exit_activated"] = exit_activated
+    state["exit_last_edge_idx"] = exit_last_edge_idx
     return None
 
-def detect_entering_home(sensor_states, sensors, timer_app_instance, activity_label=None):
-    global returning_triggered, returning_time, exit_activated, prev_entry_state
-    global exit_triggered, exit_time, exit_last_edge_idx
+def detect_entering_home(sensor_states, sensors, timer_app_instance, activity_label=None, state: dict | None = None):
+    if state is None:
+        state = {}
 
-    if 'exit_activated' not in globals():
-        exit_activated = False
-    if 'returning_triggered' not in globals():
-        returning_triggered = False
-    if 'returning_time' not in globals():
-        returning_time = None
-    if 'prev_entry_state' not in globals():
-        prev_entry_state = None
-    if 'exit_triggered' not in globals():
-        exit_triggered = False
-    if 'exit_time' not in globals():
-        exit_time = None
-    if 'exit_last_edge_idx' not in globals():
-        exit_last_edge_idx = -1
+    returning_triggered = bool(state.get("returning_triggered", False))
+    returning_time = state.get("returning_time")
+    exit_activated = bool(state.get("exit_activated", False))
+    prev_entry_state = state.get("prev_entry_state")
+    exit_triggered = bool(state.get("exit_triggered", False))
+    exit_time = state.get("exit_time")
+    exit_last_edge_idx = int(state.get("exit_last_edge_idx", -1))
 
     # If I wasn't away from home, I can't return home
     if not exit_activated:
@@ -240,6 +251,7 @@ def detect_entering_home(sensor_states, sensors, timer_app_instance, activity_la
             if s.name.lower() == "entrance" and s.type.lower() == "switch":
                 curr = sensor_states.get(s.name, {}).get("state", [])
                 prev_entry_state = (curr[-1] if curr else 0)
+                state["prev_entry_state"] = prev_entry_state
                 break
         return None
 
@@ -261,6 +273,7 @@ def detect_entering_home(sensor_states, sensors, timer_app_instance, activity_la
 
     # update for next interaction
     prev_entry_state = curr_entrance
+    state["prev_entry_state"] = prev_entry_state
 
     # At least one PIR must be activated within 5 simulated seconds
     if returning_triggered:
@@ -297,6 +310,7 @@ def detect_entering_home(sensor_states, sensors, timer_app_instance, activity_la
                 if activity_label:
                     activity_label.config(text="Activity: returning home")
                     def reset_label():
+                        current_activities = state.get("current_activities", {})
                         if current_activities:
                             activity_label.config(
                                 text="Activity: " + ", ".join(sorted(current_activities.keys()))
@@ -305,14 +319,26 @@ def detect_entering_home(sensor_states, sensors, timer_app_instance, activity_la
                             activity_label.config(text="Activity: None")
                     activity_label.after(2000, reset_label)
 
+                state["returning_triggered"] = returning_triggered
+                state["returning_time"] = returning_time
+                state["exit_activated"] = exit_activated
+                state["exit_triggered"] = exit_triggered
+                state["exit_time"] = exit_time
+                state["exit_last_edge_idx"] = exit_last_edge_idx
+
                 return "returning home"
 
+    state["returning_triggered"] = returning_triggered
+    state["returning_time"] = returning_time
+    state["exit_activated"] = exit_activated
+    state["exit_triggered"] = exit_triggered
+    state["exit_time"] = exit_time
+    state["exit_last_edge_idx"] = exit_last_edge_idx
     return None
 
 
-def detect_sleeping(sensor_states, sensors, points, timer_app_instance):
-
-    global sleep_weight_start
+def detect_sleeping(sensor_states, sensors, points, timer_app_instance, state: dict):
+    sleep_weight_start = state.setdefault("sleep_weight_start", {})
 
     bed_pattern = re.compile(r'^bed\d*$', re.IGNORECASE)
 
@@ -349,14 +375,18 @@ def detect_sleeping(sensor_states, sensors, points, timer_app_instance):
 
 
 
-def detect_meal(sensor_states, sensors, devices, timer_app_instance):
-    global meal_detection_start, meal_active
+def detect_meal(sensor_states, sensors, devices, points_source, timer_app_instance, state: dict):
+    meal_detection_start = state.setdefault(
+        "meal_detection_start",
+        {"breakfast": None, "lunch": None, "dinner": None},
+    )
+    meal_active = state.get("meal_active")
     TABLE_RADIUS = 40  # max distance weight - table
 
     # find table coordinates
     table_coords = None
     table_pattern = re.compile(r'^table\d*$', re.IGNORECASE)
-    for point in (points + coordinates):
+    for point in points_source:
         if table_pattern.match(point.name):
             table_coords = (point.x, point.y)
             break
@@ -398,8 +428,8 @@ def detect_meal(sensor_states, sensors, devices, timer_app_instance):
             if type.lower() == "oven" and state == 0:
                 pir = find_closest_sensor_within_fov((x, y), sensors, walls_coordinates, doors, RADIUS_STANDARD, FOV_ANGLE)
                 if pir:
-                    state = sensor_states.get(pir.name, {}).get("state", [])
-                    if state and state[-1] == 1:
+                    pir_state = sensor_states.get(pir.name, {}).get("state", [])
+                    if pir_state and pir_state[-1] == 1:
                         if not weight_active_near_table():
                             return None
                         if meal_active == slot:
@@ -411,6 +441,7 @@ def detect_meal(sensor_states, sensors, devices, timer_app_instance):
                             if delta >= MEAL_MIN_DURATION:
                                 meal_detection_start[slot] = None
                                 meal_active = slot
+                                state["meal_active"] = meal_active
                                 return slot
                         return None
 
@@ -418,9 +449,11 @@ def detect_meal(sensor_states, sensors, devices, timer_app_instance):
         meal_detection_start[slot] = None
         if meal_active == slot:
             meal_active = None
+            state["meal_active"] = meal_active
     else:
         for key in meal_detection_start:
             meal_detection_start[key] = None
         meal_active = None
+        state["meal_active"] = meal_active
 
     return None

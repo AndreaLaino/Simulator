@@ -33,7 +33,7 @@ def build_cycles_raw_data(
     min_duration_minutes: float,
     min_off_minutes: float,
     tail_samples: int,
-    max_idle_gap_minutes: float | None = 5.0,
+    max_idle_gap_minutes: float | None = 5.0,   
 ) -> list[dict[str, Any]]:
     df = pd.read_csv(
         input_path,
@@ -475,7 +475,7 @@ def run_cycle_pipeline(
         cycles = [cycles[int(i)] for i in sorted(pick)]
 
     if len(cycles) < 3:
-        raise RuntimeError("Servono almeno 3 cicli per clustering affidabile.")
+        raise RuntimeError("You need at least 3 cycles to perform clustering analysis. Found only: {}".format(len(cycles)))
 
     target_len = int(f["target_len"])
     norm_mode = str(f["curve_norm_mode"])

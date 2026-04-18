@@ -107,15 +107,25 @@ def _upsert_runtime_profile(
 ) -> Path:
     """Persist the latest LLM selection so runtime smart meters can replay it."""
     catalog_path = LLM_SM_DIR / "llm_smartmeter_profiles.json"
+    try:
+        output_dir_value = str(output_dir.relative_to(LLM_SM_DIR))
+    except ValueError:
+        output_dir_value = str(output_dir)
+
+    try:
+        pkl_path_value = str((output_dir / "llm_runtime_cycles.pkl").relative_to(LLM_SM_DIR))
+    except ValueError:
+        pkl_path_value = str(output_dir / "llm_runtime_cycles.pkl")
+
     payload = {
         "appliance_key": appliance_key,
-        "output_dir": str(output_dir),
+        "output_dir": output_dir_value,
         "chosen_k": int(chosen_k),
         "dominant_cluster": int(dominant_cluster),
         "dominant_cluster_n_cycles": int(dominant_cluster_n_cycles),
         "selected_cluster": int(selected_cluster),
         "selected_cycle_id": int(selected_cycle_id),
-        "pkl_path": str(output_dir / "llm_runtime_cycles.pkl"),
+        "pkl_path": pkl_path_value,
         "updated_at": pd.Timestamp.now().isoformat(),
     }
 

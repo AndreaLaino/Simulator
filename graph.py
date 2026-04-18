@@ -7,6 +7,7 @@ import tkinter as tk
 from tkinter import messagebox
 from tkinter import ttk
 from datetime import datetime, date
+from pathlib import Path
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
@@ -15,6 +16,7 @@ import numpy as np
 import pandas as pd
 
 from sensor import sensors
+from consumption_profiles import consumption_profiles
 from read import read_sensors, read_devices
 from device import devices
 import dhtlogger
@@ -30,6 +32,24 @@ plt.rcParams.update({
 
 _LLM_PROFILE_PATH = os.path.join("LLM", "smartmeter", "llm_smartmeter_profiles.json")
 _LLM_PROFILE_LEGACY_PATH = "llm_smartmeter_profiles.json"
+
+
+def _resolve_llm_path(value: str | None) -> str:
+    if not value:
+        return ""
+    path = Path(value)
+    if path.is_absolute() and path.exists():
+        return str(path)
+
+    candidates = [
+        Path("LLM") / "smartmeter" / path,
+        Path(_LLM_PROFILE_PATH).parent / path,
+        Path(_LLM_PROFILE_LEGACY_PATH).parent / path,
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
+    return str(candidates[0])
 
 
 def _discover_selected_case_csv(appliance_key: str) -> str | None:
@@ -61,8 +81,8 @@ def _discover_selected_case_csv(appliance_key: str) -> str | None:
         if all(tok in low for tok in key_tokens):
             return p
 
-    # If nothing matches tokens, return first discovered file as last resort.
-    return candidates[0] if candidates else None
+    # Do not fall back to an unrelated appliance.
+    return None
 
 
 def _load_llm_profiles(path: str = _LLM_PROFILE_PATH) -> dict:
@@ -72,6 +92,14 @@ def _load_llm_profiles(path: str = _LLM_PROFILE_PATH) -> dict:
             if os.path.isfile(p):
                 with open(p, "r", encoding="utf-8") as f:
                     data = json.load(f)
+                    if isinstance(data, dict):
+                        for payload in data.values():
+                            if not isinstance(payload, dict):
+                                continue
+                            if "output_dir" in payload:
+                                payload["output_dir"] = _resolve_llm_path(str(payload.get("output_dir") or ""))
+                            if "pkl_path" in payload:
+                                payload["pkl_path"] = _resolve_llm_path(str(payload.get("pkl_path") or ""))
                     return data if isinstance(data, dict) else {}
     except Exception:
         pass
@@ -131,54 +159,45 @@ def _llm_info_for_smartmeter(sensor_name: str, sensor_states: dict) -> dict:
     payload = profiles.get(appliance_key)
     if isinstance(payload, dict):
         out = dict(payload)
-        out.setdefault("source", "catalog")
+        out.setdefault("source", "llm_profile_json")
+        if "output_dir" in out:
+            out["output_dir"] = _resolve_llm_path(str(out.get("output_dir") or ""))
         if "pkl_path" not in out and "output_dir" in out:
             out["pkl_path"] = os.path.join(str(out["output_dir"]), "llm_runtime_cycles.pkl")
+        if "pkl_path" in out:
+            out["pkl_path"] = _resolve_llm_path(str(out.get("pkl_path") or ""))
         return out
 
-    # Fallback for old runs where catalog file does not exist yet.
-    fallback_path = _discover_selected_case_csv(appliance_key)
-    if not os.path.isfile(fallback_path):
+    profile_payload = consumption_profiles.get(device_type)
+    if not isinstance(profile_payload, dict):
         return {}
-    try:
-        row = pd.read_csv(fallback_path).iloc[0].to_dict()
-        dominant_cluster = None
-        dominant_cluster_n_cycles = None
-        try:
-            chosen_k_raw = row.get("chosen_k")
-            chosen_k = int(float(chosen_k_raw)) if chosen_k_raw not in (None, "") else None
-            base_dir = os.path.dirname(fallback_path)
-            if chosen_k is not None:
-                summary_path = os.path.join(base_dir, f"results_k{chosen_k}", "cluster_summary.csv")
-            else:
-                summary_path = os.path.join(base_dir, "cluster_summary.csv")
-            if os.path.isfile(summary_path):
-                summary_df = pd.read_csv(summary_path)
-                if not summary_df.empty and {"cluster", "n_cycles"}.issubset(set(summary_df.columns)):
-                    summary_df["cluster"] = pd.to_numeric(summary_df["cluster"], errors="coerce")
-                    summary_df["n_cycles"] = pd.to_numeric(summary_df["n_cycles"], errors="coerce")
-                    summary_df = summary_df.dropna(subset=["cluster", "n_cycles"])
-                    if not summary_df.empty:
-                        summary_df = summary_df.sort_values(["n_cycles", "cluster"], ascending=[False, True], kind="mergesort")
-                        dominant_cluster = int(summary_df.iloc[0]["cluster"])
-                        dominant_cluster_n_cycles = int(summary_df.iloc[0]["n_cycles"])
-        except Exception:
-            pass
+    profile = profile_payload.get("profile") or {}
+    keys = sorted(float(k) for k in profile.keys()) if profile else []
+    return {
+        "appliance_key": appliance_key,
+        "device_type": device_type,
+        "associated_device": associated_device,
+        "source": "consumption_profile",
+        "profile_duration_min": int(keys[-1]) if keys else None,
+        "profile_points": len(keys),
+        "standby_w": float(profile_payload.get("standby", 0.0) or 0.0),
+    }
 
-        return {
-            "appliance_key": appliance_key,
-            "chosen_k": row.get("chosen_k"),
-            "dominant_cluster": dominant_cluster,
-            "dominant_cluster_n_cycles": dominant_cluster_n_cycles,
-            "selected_cluster": row.get("cluster"),
-            "selected_cycle_id": row.get("cycle_id"),
-            "selected_case_path": fallback_path,
-            "output_dir": os.path.dirname(fallback_path),
-            "pkl_path": os.path.join(os.path.dirname(fallback_path), "llm_runtime_cycles.pkl"),
-            "source": "selected_case_csv",
-        }
+
+def _load_profile_reference_values(info: dict) -> np.ndarray:
+    device_type = str(info.get("device_type") or "").strip()
+    payload = consumption_profiles.get(device_type)
+    if not isinstance(payload, dict):
+        return np.array([], dtype=float)
+    profile = payload.get("profile") or {}
+    if not isinstance(profile, dict) or not profile:
+        return np.array([], dtype=float)
+    try:
+        keys = sorted(float(k) for k in profile.keys())
+        vals = [float(profile[k]) for k in keys]
     except Exception:
-        return {}
+        return np.array([], dtype=float)
+    return np.asarray(vals, dtype=float)
 
 
 def _zscore(arr: np.ndarray) -> np.ndarray:
@@ -316,7 +335,7 @@ def _load_representative_cycle_values(info: dict) -> np.ndarray:
     except Exception:
         return np.array([], dtype=float)
 
-    pkl_path = str(info.get("pkl_path") or "").strip()
+    pkl_path = _resolve_llm_path(str(info.get("pkl_path") or "").strip())
     if not pkl_path or not os.path.isfile(pkl_path):
         return np.array([], dtype=float)
 
@@ -355,8 +374,8 @@ def _load_cluster_mean_values(info: dict) -> np.ndarray:
     except Exception:
         return np.array([], dtype=float)
 
-    output_dir = str(info.get("output_dir") or "").strip()
-    pkl_path = str(info.get("pkl_path") or "").strip()
+    output_dir = _resolve_llm_path(str(info.get("output_dir") or "").strip())
+    pkl_path = _resolve_llm_path(str(info.get("pkl_path") or "").strip())
     if not output_dir or not pkl_path:
         return np.array([], dtype=float)
 
@@ -435,6 +454,10 @@ def _compute_shape_similarity(df_sim: pd.DataFrame, info: dict) -> dict:
         return out
     sim_vals = sim_series.to_numpy(dtype=float)
     rep_vals = _load_representative_cycle_values(info)
+    shape_ref = "selected_cycle"
+    if rep_vals.size < 10:
+        rep_vals = _load_profile_reference_values(info)
+        shape_ref = "consumption_profile"
     rep_seg = _extract_activity_segment(rep_vals, min_len=8)
     if rep_seg.size < 10:
         return out
@@ -471,7 +494,7 @@ def _compute_shape_similarity(df_sim: pd.DataFrame, info: dict) -> dict:
     out["shape_available"] = True
     out["shape_corr"] = corr
     out["shape_rmse"] = rmse
-    out["shape_ref"] = "selected_cycle"
+    out["shape_ref"] = shape_ref
     try:
         idx = sim_series.index
         if len(idx) >= sim_e and sim_s < sim_e:
@@ -499,18 +522,30 @@ def _draw_smartmeter_info_box(ax, info: dict):
         lines = [
             f"LLM source: {info.get('source', '?')}",
             f"appliance: {info.get('appliance_key', '?')}",
-            f"k: {info.get('chosen_k', '?')}",
-            f"dominant cluster: {info.get('dominant_cluster', '?')} (n={info.get('dominant_cluster_n_cycles', '?')})",
-            f"selected cluster: {info.get('selected_cluster', '?')}",
-            f"selected cycle: {info.get('selected_cycle_id', '?')}",
+        ]
+        if info.get("source") == "llm_profile_json":
+            lines.extend([
+                f"k: {info.get('chosen_k', '?')}",
+                f"dominant cluster: {info.get('dominant_cluster', '?')} (n={info.get('dominant_cluster_n_cycles', '?')})",
+                f"selected cluster: {info.get('selected_cluster', '?')}",
+                f"selected cycle: {info.get('selected_cycle_id', '?')}",
+            ])
+        else:
+            lines.extend([
+                f"device type: {info.get('device_type', '?')}",
+                f"profile duration: {info.get('profile_duration_min', '?')} min",
+                f"profile points: {info.get('profile_points', '?')}",
+                f"standby: {info.get('standby_w', '?')} W",
+            ])
+        lines.extend([
             f"window(sim): {shape_win_s} -> {shape_win_e}",
             shape_line,
-        ]
+        ])
     else:
         lines = [
-            "LLM metadata not found",
-            "Run LLM Smart Meter once",
-            "or ensure selected_case CSV exists",
+            "Smart Meter metadata not found",
+            "No LLM profile in llm_smartmeter_profiles.json",
+            "No fallback consumption profile for this device",
         ]
     ax.text(
         0.015,
@@ -685,7 +720,8 @@ def _simple_rebase_to_day(df: pd.DataFrame, ref_day: date) -> pd.DataFrame:
 
 def show_graphs(canvas, sensor_states):
     def generate_graph(sensor, sensor_data, frame):
-        fig, ax = plt.subplots(figsize=(12, 6))
+        fig, ax = plt.subplots(figsize=(12, 6), facecolor="white")
+        ax.set_facecolor("white")
 
         time_list = sensor_data.get('time', [])
         state_list = sensor_data.get('state', [])
@@ -783,7 +819,9 @@ def show_graphs(canvas, sensor_states):
         ax.set_xlabel("Time")
         ax.set_ylabel(y_label)
 
-        ax.legend()
+        handles, labels = ax.get_legend_handles_labels()
+        if handles:
+            ax.legend()
         ax.grid(True, linestyle=':', alpha=0.7)
         ax.yaxis.set_major_locator(MaxNLocator(8))
         ax.yaxis.set_major_formatter(FormatStrFormatter('%.1f'))
@@ -856,7 +894,8 @@ def show_graphs(canvas, sensor_states):
 
 def show_graphs_auto(sensor_states, selected_keys, target_frame):
     def generate_graph(sensor, sensor_data, frame):
-        fig, ax = plt.subplots(figsize=(12, 6))
+        fig, ax = plt.subplots(figsize=(12, 6), facecolor="white")
+        ax.set_facecolor("white")
 
         time_list = sensor_data.get('time', [])
         state_list = sensor_data.get('state', [])
@@ -946,7 +985,9 @@ def show_graphs_auto(sensor_states, selected_keys, target_frame):
         ax.set_xlabel("Time")
         ax.set_ylabel(y_label)
 
-        ax.legend()
+        handles, labels = ax.get_legend_handles_labels()
+        if handles:
+            ax.legend()
         ax.grid(True, linestyle=':', alpha=0.7)
         ax.yaxis.set_major_locator(MaxNLocator(8))
         ax.yaxis.set_major_formatter(FormatStrFormatter('%.1f'))

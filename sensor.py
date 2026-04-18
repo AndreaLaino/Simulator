@@ -1,11 +1,9 @@
 import tkinter as tk
 from tkinter import simpledialog, messagebox
 from tkinter import ttk
-from utils import draw_sensor, calculate_distance, update_sensor_color, update_temperature_sensor_color
-from common import sensor_states
+from utils import draw_sensor, calculate_distance, update_temperature_sensor_color
 from device import devices
 from datetime import datetime
-from common import active_cycles
 from consumption_profiles import get_device_consumption, consumption_profiles
 from read import read_sensors as sensors_file
 from read import read_devices as devices_file
@@ -19,6 +17,7 @@ import pandas as pd
 from collections import deque
 from typing import Optional
 from models import Sensor, Device
+from house_state import HouseState
 
 TEMP_RECENT: dict[str, deque] = {}
 TEMP_GREEN_UNTIL: dict[str, float] = {}
@@ -42,6 +41,105 @@ SENSOR_MAP_PATH = "sensor_map.json"
 TEMP_SERIES: dict[str, Optional[tuple[list[datetime], list[float]]]] = {}
 # simulated time (in delta_seconds units) per sensor
 TEMP_SIM_MIN: dict[str, float] = {}
+
+
+class TemperatureSensorAdapter:
+    """Pure adapter: translate HouseState runtime into compute_temperature inputs."""
+
+    def update(
+        self,
+        state: HouseState,
+        sensor: Sensor,
+        *,
+        heating_factor: float | None = None,
+        delta_seconds: float | None = None,
+        current_datetime=None,
+        active_devices=None,
+        render: bool = True,
+    ):
+        runtime = state.runtime_view(
+            heating_factor=heating_factor,
+            delta_seconds=delta_seconds,
+            current_datetime=current_datetime,
+            devices=active_devices,
+        )
+        heating_factor = float(runtime.get("heating_factor", 0.0) or 0.0)
+        delta_seconds = float(runtime.get("delta_seconds", 1.0) or 1.0)
+        current_datetime = runtime.get("current_datetime")
+        active_devices = runtime.get("devices")
+
+        new_state = compute_temperature(
+            sensor,
+            heating_factor,
+            delta_seconds,
+            current_datetime,
+            active_devices,
+        )
+        return sensor.name, new_state
+
+
+class PIRSensorAdapter:
+    """Pure adapter for PIR state transitions."""
+
+    def update(self, state: HouseState, sensor: Sensor, new_state=None, *, render: bool = True):
+        current_state = float(sensor.state)
+        resolved_state = 1.0 if current_state == 0.0 else 0.0 if new_state is None else float(new_state)
+        return sensor.name, resolved_state
+
+
+class SmartMeterSensorAdapter:
+    """Pure adapter: translate HouseState runtime into Smart Meter inputs."""
+
+    def update(
+        self,
+        state: HouseState,
+        sensor: Sensor,
+        *,
+        devices_list=None,
+        delta_seconds: float | None = None,
+        current_datetime=None,
+        render: bool = True,
+    ):
+        runtime = state.runtime_view(
+            devices=devices_list,
+            delta_seconds=delta_seconds,
+            current_datetime=current_datetime,
+        )
+        devices_list = runtime.get("devices")
+        if devices_list is None:
+            raise RuntimeError("SmartMeterSensorAdapter requires runtime['devices'] or an explicit devices_list")
+        delta_seconds = float(runtime.get("delta_seconds", 1.0) or 1.0)
+        current_datetime = runtime.get("current_datetime")
+        cycles_store = state.active_cycles()
+
+        consumption = compute_smartmeter_consumption(
+            sensor,
+            devices_list,
+            delta_seconds,
+            current_datetime,
+            cycles_store,
+        )
+        return sensor.name, consumption
+
+
+def is_temperature_sensor_changing(sensor_name: str) -> bool:
+    sim_min = float(TEMP_SIM_MIN.get(sensor_name, 0.0))
+    green_until = float(TEMP_GREEN_UNTIL.get(sensor_name, 0.0))
+    return sim_min <= green_until
+
+
+class WeightSensorAdapter:
+    """Pure adapter for Weight sensor transitions."""
+
+    def update(self, state: HouseState, sensor: Sensor, new_state, *, render: bool = True):
+        return sensor.name, float(new_state)
+
+
+class SwitchSensorAdapter:
+    """Pure adapter for Switch sensor transitions."""
+
+    def update(self, state: HouseState, sensor: Sensor, door_state, *, render: bool = True):
+        return sensor.name, _normalize_switch_state(door_state)
 
 def _load_sensor_map(path: str = SENSOR_MAP_PATH) -> dict:
     try:
@@ -313,6 +411,19 @@ def get_replay_temperature(sensor_name: str, current_datetime: Optional[datetime
         # Final fallback: use last known value from CSV
         return float(values[-1]) if values else None
 
+
+def _normalize_switch_state(door_state) -> float:
+    try:
+        return float(door_state)
+    except ValueError:
+        if isinstance(door_state, str):
+            lowered = door_state.lower()
+            if lowered == "open":
+                return 1.0
+            if lowered == "close":
+                return 0.0
+    return 0.0
+
 def get_sensor_params(sensor_type):
     params = {
         "PIR": {"min": 0.0, "max": 1.0, "step": 1.0, "state": 0.0, "direction": 0, "consumption": None},
@@ -396,24 +507,6 @@ def add_sensor(canvas, event, load_active):
         draw_sensor(canvas, sensor)
 
 
-def changePIR(canvas, sensor, sensors, new_state=None):
-    name, x, y, type_s, min_val = sensor.name, sensor.x, sensor.y, sensor.type, sensor.min_val
-    state = float(sensor.state)
-
-    if new_state is None:
-        new_state = 1 if state == 0 else 0
-
-    for s in sensors:
-        if s.name == sensor.name:
-            s.state = float(new_state)
-        elif s.type == "PIR":
-            s.state = 0.0
-            update_sensor_color(canvas, s.name, 0, s.min_val)
-
-    update_sensor_color(canvas, name, new_state, float(min_val))
-    return name, new_state, sensors
-
-
 def get_last_real_temperature(sensor_name: str, window_minutes: int = 10):
     if not sensor_name:
         return None
@@ -493,38 +586,20 @@ def infer_room_state(sensor_name: str, window_minutes: int = 20) -> str:
     else:
         return "stable"
 
-def changeTemperature(canvas, sensor, sensors, heating_factor, delta_seconds, current_datetime=None, active_devices=None):
-    """
-    Update a Temperature sensor state with dynamic simulation.
 
-    Behavior:
-      - Uses a realistic thermal model:
-          * Daily cycle (cooler at night, warmer during day)
-          * Device heat contribution (computers, appliances generate heat)
-          * Thermal inertia (slow, gradual changes)
-      - If real CSV exists beyond sim_min: optionally blend/compare
-    """
-    name, x, y, s_type = sensor.name, sensor.x, sensor.y, sensor.type
-    min_val = sensor.min_val
-    max_val = sensor.max_val
-    step = sensor.step
-    state = sensor.state
-    direction = sensor.direction
-    consumption = sensor.consumption
-    associated_device = sensor.associated_device
-
-    min_val = float(min_val)
-    max_val = float(max_val)
-    step = float(step)
-    current_state = float(state)
+def compute_temperature(sensor, heating_factor, delta_seconds, current_datetime=None, active_devices=None):
+    """Compute next Temperature sensor state with no UI side effects."""
+    name, x, y = sensor.name, sensor.x, sensor.y
+    max_val = float(sensor.max_val)
+    current_state = float(sensor.state)
 
     # 1 real second = 1 simulated minute
     prev_sim_min = float(TEMP_SIM_MIN.get(name, 0.0))
     delta_sim_min = float(delta_seconds or 0.0)
-    
+
     # Clamp delta to reasonable range (0.1 to 120 minutes per step)
     delta_sim_min = max(0.1, min(120.0, delta_sim_min))
-    
+
     sim_min = prev_sim_min + delta_sim_min
     TEMP_SIM_MIN[name] = sim_min
 
@@ -536,30 +611,24 @@ def changeTemperature(canvas, sensor, sensors, heating_factor, delta_seconds, cu
     recent.append(float(current_state))
 
     # Preload CSV target (if any) so we can decide whether to apply daily cycle.
-    # Pass the actual current_datetime for real-time alignment
     csv_target = get_replay_temperature(name, current_datetime)
 
-    # --- DYNAMIC THERMAL MODEL ---
     # Base temperature follows daily cycle only if CSV data is available.
     if csv_target is None:
         if name not in TEMP_BASELINE:
             TEMP_BASELINE[name] = float(current_state)
         base_temp = TEMP_BASELINE[name]
     else:
-        # Use real time of day from current_datetime for accurate daily cycle
         if current_datetime is not None:
             hour_of_day = current_datetime.hour + current_datetime.minute / 60.0
         else:
-            # Fallback to relative minutes if no current_datetime
-            time_of_day = (sim_min % (24 * 60))  # minutes since midnight
+            time_of_day = (sim_min % (24 * 60))
             hour_of_day = time_of_day / 60.0
 
-        # Base temperature: 15°C at night (4 AM), 20°C during day (2 PM)
-        # Sinusoidal cycle with min at 4:00 and max at 14:00
-        phase = ((hour_of_day - 4.0) / 24.0) * 2 * math.pi  # 4 AM = minimum
-        base_temp = 17.5 + 2.5 * math.sin(phase)  # oscillates 15-20°C
-    
-    # Device heat contribution (check nearby active devices)
+        phase = ((hour_of_day - 4.0) / 24.0) * 2 * math.pi
+        base_temp = 17.5 + 2.5 * math.sin(phase)
+
+    # Device heat contribution
     device_heat = 0.0
     heat_by_type = {
         "Oven": 3.5,
@@ -579,40 +648,34 @@ def changeTemperature(canvas, sensor, sensors, heating_factor, delta_seconds, cu
     }
     default_heat = 0.8
     default_radius = 140.0
+
     if active_devices:
         for dev in active_devices:
-            if len(dev) >= 10:
-                dev_name, dev_x, dev_y, dev_type, _, dev_state = dev[:6]
-                if dev_state == 1:  # device is ON
-                    # Calculate distance to this temperature sensor
-                    dist = ((float(dev_x) - float(x))**2 + (float(dev_y) - float(y))**2)**0.5
-                    # Heat contribution decays with distance by device type.
-                    max_heat = heat_by_type.get(dev_type, default_heat)
-                    radius = radius_by_type.get(dev_type, default_radius)
-                    if dist < radius:
-                        contribution = max_heat * (1.0 - dist / radius)
-                        device_heat += contribution
-    
-    # Target temperature = base + device heat
-    target_temp = base_temp + device_heat
+            if not isinstance(dev, Device):
+                continue
 
-    # If a CSV series exists, nudge the target toward historical/replay values.
-    # With high weight (0.9), the simulation follows the CSV closely while maintaining some model stability.
+            if dev.state == 1:
+                dist = ((float(dev.x) - float(x)) ** 2 + (float(dev.y) - float(y)) ** 2) ** 0.5
+                max_heat = heat_by_type.get(dev.type, default_heat)
+                radius = radius_by_type.get(dev.type, default_radius)
+                if dist < radius:
+                    device_heat += max_heat * (1.0 - dist / radius)
+
+    # Allow a direct external heating factor contribution (domain input from orchestrator)
+    target_temp = base_temp + device_heat + (float(heating_factor) * 0.5)
+
     if csv_target is not None:
         try:
             csv_target = float(csv_target)
-            csv_weight = 0.9  # High weight: mostly follow CSV (0.9) with ~10% model correction
+            csv_weight = 0.9
             target_temp = (csv_target * csv_weight) + (target_temp * (1.0 - csv_weight))
         except Exception:
             pass
-    
-    # Apply thermal inertia (slow convergence to target)
-    # Larger time constant = slower changes (realistic for building thermal mass)
-    time_constant = 30.0  # minutes to reach ~63% of target
+
+    time_constant = 30.0
     alpha = 1.0 - math.exp(-delta_sim_min / time_constant)
     new_state = current_state + alpha * (target_temp - current_state)
-    
-    # Clamp to reasonable bounds (expand to CSV target if needed)
+
     effective_min = 0.0
     effective_max = max_val
     if csv_target is not None:
@@ -624,28 +687,12 @@ def changeTemperature(canvas, sensor, sensors, heating_factor, delta_seconds, cu
     new_state = max(effective_min, min(effective_max, new_state))
     new_state = round(new_state, 2)
 
-
-    # Update buffer with the new value
     recent.append(float(new_state))
 
-    updated = []
-    for s in sensors:
-        if s == sensor:
-            updated.append(
-                (name, x, y, s_type, min_val, max_val, step, new_state, direction, consumption, associated_device)
-            )
-        else:
-            updated.append(s)
-
-    temp_change_abs = abs(new_state - current_state)
-    if temp_change_abs > 0.0:
+    if abs(new_state - current_state) > 0.0:
         TEMP_GREEN_UNTIL[name] = sim_min + 5.0
-    green_until = TEMP_GREEN_UNTIL.get(name, 0.0)
-    changing = sim_min <= green_until
-    if canvas is not None:
-        update_temperature_sensor_color(canvas, name, changing=changing)
-    return name, new_state, updated
 
+    return new_state
 
 def _device_type_to_appliance_key(dev_type: Optional[str]) -> Optional[str]:
     mapping = {
@@ -658,6 +705,25 @@ def _device_type_to_appliance_key(dev_type: Optional[str]) -> Optional[str]:
     if not dev_type:
         return None
     return mapping.get(str(dev_type).strip().lower())
+
+
+def _resolve_llm_catalog_path(value: str | Path | None) -> Path:
+    if value is None:
+        return Path()
+
+    path = Path(value)
+    if path.is_absolute():
+        return path
+
+    candidate = LLM_PROFILE_CATALOG_PATH.parent / path
+    if candidate.exists():
+        return candidate
+
+    legacy_candidate = LLM_PROFILE_CATALOG_LEGACY_PATH.parent / path
+    if legacy_candidate.exists():
+        return legacy_candidate
+
+    return candidate
 
 
 def _load_llm_profile_catalog() -> dict:
@@ -697,7 +763,7 @@ def _load_llm_cycle_curve(profile: dict) -> Optional[tuple[list[float], list[flo
     try:
         appliance_key = str(profile.get("appliance_key") or "").strip()
         cycle_id = int(profile.get("selected_cycle_id"))
-        pkl_path = Path(str(profile.get("pkl_path") or "").strip())
+        pkl_path = _resolve_llm_catalog_path(str(profile.get("pkl_path") or "").strip())
     except Exception:
         return None
 
@@ -823,16 +889,8 @@ def _find_associated_device(dev_list, wanted_name):
     return next((d for d in dev_list if d.name == wanted_name), None)
 
 
-def changeSmartMeter(canvas, sensor, sensors, devices, delta_seconds, current_datetime):
+def compute_smartmeter_consumption(sensor, devices, delta_seconds, current_datetime, active_cycles_store=None):
     name = sensor.name
-    x = sensor.x
-    y = sensor.y
-    type = sensor.type
-    min_val = sensor.min_val
-    max_val = sensor.max_val
-    step = sensor.step
-    state = sensor.state
-    direction = sensor.direction
     associated_device = sensor.associated_device
 
     new_consumption = 0.0
@@ -850,8 +908,6 @@ def changeSmartMeter(canvas, sensor, sensors, devices, delta_seconds, current_da
                 dev_name = associated_dev.name
                 dev_type = associated_dev.type
                 dev_state = associated_dev.state
-            else:
-                dev_name, _, _, dev_type, _, dev_state, *_ = associated_dev
 
         llm_consumption = _get_llm_smartmeter_consumption(name, dev_type, int(dev_state), current_datetime)
         if llm_consumption is not None:
@@ -859,28 +915,14 @@ def changeSmartMeter(canvas, sensor, sensors, devices, delta_seconds, current_da
         elif dev_name is not None and dev_type is not None:
             # Fallback only if no LLM profile exists for this appliance type.
             if dev_state == 1:
+                cycles_ref = active_cycles_store if isinstance(active_cycles_store, dict) else {}
                 new_consumption = get_device_consumption(
-                    dev_name, dev_type, current_datetime, active_cycles, dev_state
+                    dev_name, dev_type, current_datetime, cycles_ref, dev_state
                 )
             else:
                 new_consumption = 0.0
 
-    # update the sensor array with new consumption
-    sensor.consumption = new_consumption
-
-    # update color (green if above minimum threshold)
-    update_sensor_color(canvas, name, new_consumption, min_val)
-
-    return name, new_consumption, sensors
-
-
-def ChangeWeight(canvas, sensor, sensors, new_state):
-    name, x, y, type, min_val = sensor.name, sensor.x, sensor.y, sensor.type, sensor.min_val
-
-    sensor.state = float(new_state)
-
-    update_sensor_color(canvas, name, new_state, float(min_val))
-    return name, new_state, sensors
+    return float(new_consumption)
 
 
 class SensorDialog(simpledialog.Dialog):
@@ -898,14 +940,10 @@ class SensorDialog(simpledialog.Dialog):
         for dev in devices or []:
             if hasattr(dev, "name") and dev.name:
                 names.add(str(dev.name).strip())
-            elif isinstance(dev, tuple) and len(dev) > 0 and dev[0]:
-                names.add(str(dev[0]).strip())
 
         for dev in devices_file or []:
             if hasattr(dev, "name") and dev.name:
                 names.add(str(dev.name).strip())
-            elif isinstance(dev, tuple) and len(dev) > 0 and dev[0]:
-                names.add(str(dev[0]).strip())
 
         return sorted(n for n in names if n)
 
