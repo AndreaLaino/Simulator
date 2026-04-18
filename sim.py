@@ -1,28 +1,296 @@
 #sim.py
 from PIL import Image, ImageTk
 from datetime import datetime, timedelta
-from wall import walls_coordinates
-from point import points
-from door import doors, interaction_with_door
-from device import devices
-from read import coordinates, read_sensors, read_walls_coordinates, read_devices, read_doors
-from sensor import sensors, changePIR, changeTemperature, changeSmartMeter, ChangeWeight
-from utils import find_closest_sensor_within_fov, update_devices_consumption, find_closest_sensor_without_intersection, find_switch_sensors_by_doors, calculate_distance
-from common import update_sensor_states, sensor_states, changeSwitch, active_cycles
+from door import interaction_with_door, draw_all_doors
+from sensor import (
+    TemperatureSensorAdapter,
+    PIRSensorAdapter,
+    SmartMeterSensorAdapter,
+    WeightSensorAdapter,
+    SwitchSensorAdapter,
+    is_temperature_sensor_changing,
+)
+from utils import find_closest_sensor_within_fov, update_devices_consumption, find_closest_sensor_without_intersection, find_switch_sensors_by_doors, calculate_distance, update_sensor_color, update_temperature_sensor_color
+from common import update_sensor_states
 from log import log_move, log_sensor_event, log_device_event, log_door_event
-from app.context import AppContext
-from models import Sensor, Device, Point, Door, Wall
+from house_state import HouseState
 
-last_temp_elapsed = None
-avatar_image = None
-avatar_id = None
-sen_sim = []
 MAX_DISTANCE = 230
 FOV_ANGLE = 60
-active_pir_sensors = []
+SMARTMETER_ACTIVE_THRESHOLD_W = 1.0
 
 PER_SECOND_SENSOR_SAMPLING = True
 PER_SECOND_SENSOR_TYPES = {"PIR", "Switch", "Weight"}
+
+
+def _prepare_house_state(
+    house_state: HouseState,
+    *,
+    devices_list,
+    delta_seconds=None,
+    current_datetime=None,
+) -> HouseState:
+    house_state.replace_runtime(
+        devices=devices_list,
+        delta_seconds=delta_seconds,
+        current_datetime=current_datetime,
+    )
+    return house_state
+
+
+def _consumption_to_bin_state(consumption: float | None, threshold_w: float = SMARTMETER_ACTIVE_THRESHOLD_W) -> int:
+    return 1 if (consumption or 0.0) > threshold_w else 0
+
+
+def _append_unique_sample(buffer, ts, state_val, consumption_val=None):
+    def _to_float(v):
+        try:
+            return float(round(float(v), 2))
+        except Exception:
+            return float("nan")
+
+    state_float = _to_float(state_val)
+    buffer.setdefault('time', [])
+    buffer.setdefault('state', [])
+    if 'consumption' in buffer:
+        buffer.setdefault('consumption', [])
+
+    if buffer['time'] and buffer['time'][-1] == ts:
+        buffer['state'][-1] = state_float
+        if 'consumption' in buffer and consumption_val is not None:
+            buffer['consumption'][-1] = _to_float(consumption_val)
+    else:
+        buffer['time'].append(ts)
+        buffer['state'].append(state_float)
+        if 'consumption' in buffer and consumption_val is not None:
+            buffer['consumption'].append(_to_float(consumption_val))
+
+
+def _sim_state(house_state: HouseState) -> dict:
+    state = house_state.sim_state()
+    state.setdefault("last_temp_elapsed", None)
+    state.setdefault("avatar_image", None)
+    state.setdefault("avatar_id", None)
+    state.setdefault("active_pir_sensors", [])
+    return state
+
+
+def _collect_temperature_updates(
+    house_state: HouseState,
+    s_sensors,
+    d_devices,
+    *,
+    delta_seconds=None,
+    current_datetime=None,
+):
+    temp_adapter = TemperatureSensorAdapter()
+    updates = []
+
+    for sensor in s_sensors:
+        if sensor.type != "Temperature":
+            continue
+
+        heating_factor = _compute_heating(sensor, d_devices)
+        sensor_name, new_state = temp_adapter.update(
+            house_state,
+            sensor,
+            heating_factor=heating_factor,
+            delta_seconds=delta_seconds,
+            current_datetime=current_datetime,
+            active_devices=d_devices,
+            render=False,
+        )
+        updates.append((sensor, sensor_name, float(new_state)))
+
+    return updates
+
+
+def _apply_temperature_state_updates(temperature_updates):
+    for sensor, _, new_state in temperature_updates:
+        sensor.state = float(new_state)
+
+
+def _store_temperature_updates(state_store, timestamp, temperature_updates):
+    for _, sensor_name, new_state in temperature_updates:
+        update_sensor_states(sensor_name, new_state, state_store, timestamp)
+
+
+def _compute_heating(sensor, devices):
+    for device in devices:
+        if device.type == "Oven" and device.state == 1:
+            dist = calculate_distance(sensor.x, sensor.y, device.x, device.y)
+            if dist <= 50:
+                return 1
+    return 0
+
+
+def _update_smartmeter_sensors(
+    house_state: HouseState,
+    s_sensors,
+    state_store,
+    timestamp,
+    *,
+    devices_list,
+    delta_seconds,
+    current_datetime,
+):
+    smartmeter_adapter = SmartMeterSensorAdapter()
+    updated_smartmeters = set()
+    smartmeter_updates = []
+
+    for sensor in s_sensors:
+        if sensor.type != "Smart Meter":
+            continue
+
+        sensor_name, new_consumption = smartmeter_adapter.update(
+            house_state,
+            sensor,
+            devices_list=devices_list,
+            delta_seconds=delta_seconds,
+            current_datetime=current_datetime,
+            render=False,
+        )
+        smartmeter_updates.append((sensor, sensor_name, float(new_consumption)))
+
+    for sensor, sensor_name, new_consumption in smartmeter_updates:
+        sensor.consumption = float(new_consumption)
+        associated_device = sensor.associated_device
+
+        if sensor_name not in state_store:
+            state_store[sensor_name] = {
+                'time': [],
+                'state': [],
+                'consumption': [],
+                'type': 'Smart Meter',
+                'associated_device': associated_device,
+            }
+        else:
+            state_store[sensor_name].setdefault('type', 'Smart Meter')
+            state_store[sensor_name].setdefault('associated_device', associated_device)
+            state_store[sensor_name].setdefault('consumption', [])
+
+        bin_state = _consumption_to_bin_state(new_consumption)
+        _append_unique_sample(state_store[sensor_name], timestamp, bin_state, round(new_consumption, 2))
+
+        log_sensor_event(
+            house_state,
+            timestamp,
+            sensor_name,
+            "Smart Meter",
+            int(sensor.x),
+            int(sensor.y),
+            float(round(new_consumption, 2)),
+            f"device:{associated_device}",
+        )
+        updated_smartmeters.add(sensor_name)
+
+    return updated_smartmeters
+
+
+def _render_sensor_states(canvas, s_sensors):
+    if canvas is None:
+        return
+
+    for sensor in s_sensors:
+        sensor_type = sensor.type
+        if sensor_type == "Temperature":
+            update_temperature_sensor_color(
+                canvas,
+                sensor.name,
+                changing=is_temperature_sensor_changing(sensor.name),
+            )
+        elif sensor_type == "Smart Meter":
+            update_sensor_color(
+                canvas,
+                sensor.name,
+                float(sensor.consumption or 0.0),
+                SMARTMETER_ACTIVE_THRESHOLD_W,
+            )
+        else:
+            update_sensor_color(canvas, sensor.name, float(sensor.state), float(sensor.min_val))
+
+
+def _render_device_states(canvas, d_devices):
+    if canvas is None:
+        return
+    for device in d_devices:
+        canvas.itemconfig(device.name, fill="red" if int(device.state) == 0 else "green")
+
+
+def _render_interaction_scene(canvas, d_devices, s_sensors, d_doors):
+    _render_device_states(canvas, d_devices)
+    _render_sensor_states(canvas, s_sensors)
+    draw_all_doors(canvas, d_doors)
+
+
+def _snapshot_device_smartmeters(
+    house_state: HouseState,
+    s_sensors,
+    d_devices,
+    state_store,
+    timestamp,
+    updated_smartmeters,
+):
+    for device in d_devices:
+        dev_name = device.name
+        current_cons = device.current_consumption
+
+        for sensor in s_sensors:
+            if sensor.type != "Smart Meter" or sensor.associated_device != dev_name:
+                continue
+
+            sensor_name = sensor.name
+            if sensor_name in updated_smartmeters:
+                continue
+
+            if sensor_name not in state_store:
+                state_store[sensor_name] = {
+                    'time': [],
+                    'state': [],
+                    'consumption': [],
+                    'type': 'Smart Meter',
+                    'associated_device': dev_name,
+                }
+            else:
+                state_store[sensor_name].setdefault('consumption', [])
+
+            bin_state = _consumption_to_bin_state(current_cons)
+            _append_unique_sample(state_store[sensor_name], timestamp, bin_state, round(current_cons, 2))
+            sensor.consumption = float(current_cons)
+
+            log_sensor_event(
+                house_state,
+                timestamp,
+                sensor_name,
+                "Smart Meter",
+                int(sensor.x),
+                int(sensor.y),
+                float(round(current_cons, 2)),
+                f"device:{dev_name}",
+            )
+
+
+def _sample_binary_sensors(house_state: HouseState, s_sensors, state_store, timestamp, fast: bool):
+    if (not PER_SECOND_SENSOR_SAMPLING) or fast:
+        return
+
+    for sensor in s_sensors:
+        sensor_type = sensor.type
+        if sensor_type not in PER_SECOND_SENSOR_TYPES:
+            continue
+
+        sensor_name = sensor.name
+        sx = int(sensor.x)
+        sy = int(sensor.y)
+        current_state = int(round(float(sensor.state)))
+
+        if sensor_name not in state_store:
+            state_store[sensor_name] = {'time': [], 'state': [], 'type': sensor_type}
+        else:
+            state_store[sensor_name].setdefault('type', sensor_type)
+
+        append_unique_binary(state_store[sensor_name], timestamp, current_state, sensor_type)
+        log_sensor_event(house_state, timestamp, sensor_name, sensor_type, sx, sy, int(current_state), "per-second-sample")
 
 
 def append_unique_binary(buffer, ts, state_val, type=None):
@@ -47,27 +315,227 @@ def append_unique_binary(buffer, ts, state_val, type=None):
         buffer['state'].append(s)
 
 
+def _record_binary_sensor_event(house_state: HouseState, state_store, timestamp, sensor, sensor_type: str, sensor_state, reason: str):
+    sensor_name = sensor.name
+    if sensor_name not in state_store:
+        state_store[sensor_name] = {'time': [], 'state': [], 'type': sensor_type}
+    else:
+        state_store[sensor_name].setdefault('type', sensor_type)
+
+    append_unique_binary(state_store[sensor_name], timestamp, sensor_state, sensor_type)
+    log_sensor_event(
+        house_state,
+        timestamp,
+        sensor_name,
+        sensor_type,
+        int(sensor.x),
+        int(sensor.y),
+        int(round(float(sensor_state))),
+        reason,
+    )
+
+
+def _handle_pir_interaction(
+    house_state: HouseState,
+    sim_state: dict,
+    s_sensors,
+    walls,
+    d_doors,
+    state_store,
+    timestamp,
+    click_pos,
+):
+    pir_adapter = PIRSensorAdapter()
+    closest_sensor_pir = find_closest_sensor_within_fov(click_pos, s_sensors, walls, d_doors, MAX_DISTANCE, FOV_ANGLE)
+    next_active = []
+
+    for sensor in sim_state["active_pir_sensors"]:
+        if closest_sensor_pir and sensor.name == closest_sensor_pir.name:
+            next_active.append(sensor)
+            continue
+        _, sensor_state = pir_adapter.update(house_state, sensor, 0, render=False)
+        sensor.state = float(sensor_state)
+        _record_binary_sensor_event(house_state, state_store, timestamp, sensor, "PIR", sensor_state, "auto-off-prev")
+
+    if closest_sensor_pir:
+        _, sensor_state = pir_adapter.update(house_state, closest_sensor_pir, 1, render=False)
+        closest_sensor_pir.state = float(sensor_state)
+        _record_binary_sensor_event(house_state, state_store, timestamp, closest_sensor_pir, "PIR", sensor_state, "closest_in_fov")
+        next_active = [closest_sensor_pir]
+
+    sim_state["active_pir_sensors"] = next_active
+    return closest_sensor_pir
+
+
+def _handle_weight_interaction(house_state: HouseState, s_sensors, state_store, timestamp, click_pos):
+    weight_adapter = WeightSensorAdapter()
+    click_x, click_y = click_pos
+
+    for sensor in s_sensors:
+        if sensor.type != "Weight":
+            continue
+
+        distance = calculate_distance(click_x, click_y, sensor.x, sensor.y)
+        target_state = 1 if distance < 10 else 0
+        reason = "click_nearby" if target_state == 1 else "auto_off"
+        _, sensor_state = weight_adapter.update(house_state, sensor, target_state, render=False)
+        sensor.state = float(sensor_state)
+        _record_binary_sensor_event(house_state, state_store, timestamp, sensor, "Weight", sensor_state, reason)
+
+
+def _handle_switch_interaction(house_state: HouseState, d_doors, s_sensors, state_store, timestamp):
+    switch_adapter = SwitchSensorAdapter()
+    switches_by_door = find_switch_sensors_by_doors(d_doors, s_sensors)
+
+    for door, associated_sensors, door_state in switches_by_door:
+        door_name = f"{door.x1},{door.y1}-{door.x2},{door.y2}"
+        for sensor in associated_sensors:
+            _, sensor_state = switch_adapter.update(house_state, sensor, door_state, render=False)
+            sensor.state = float(sensor_state)
+            _record_binary_sensor_event(
+                house_state,
+                state_store,
+                timestamp,
+                sensor,
+                "Switch",
+                sensor_state,
+                f"sync_with_door:{door_name}",
+            )
+
+
+def _handle_device_toggle_at_click(canvas, house_state: HouseState, timer_app_instance, runtime_sources: dict, click_pos, *, render=False):
+    click_x, click_y = click_pos
+    d_devices = runtime_sources["devices"]
+
+    for device in d_devices:
+        if abs(device.x - click_x) <= 5 and abs(device.y - click_y) <= 5:
+            toggle_device_state(
+                canvas,
+                None,
+                house_state,
+                timer_app_instance,
+                runtime_sources,
+                click_x,
+                click_y,
+                render=render,
+            )
+            return True
+    return False
+
+
+def _prepare_interaction_context(canvas, event, timer_app_instance, house_state: HouseState, runtime_sources: dict):
+    sim_state = _sim_state(house_state)
+    click_x = canvas.canvasx(event.x)
+    click_y = canvas.canvasy(event.y)
+
+    if not timer_app_instance.is_running:
+        print("Error: Simulation not started. Press 'Start Simulation' before interact.")
+        return None
+
+    if sim_state["avatar_image"] is None:
+        sim_state["avatar_image"] = initialize_avatar_image()
+
+    if sim_state["avatar_id"] is not None:
+        canvas.delete(sim_state["avatar_id"])
+    sim_state["avatar_id"] = canvas.create_image(click_x, click_y, image=sim_state["avatar_image"])
+
+    simulated_time = timer_app_instance.get_simulated_time()
+    current_date = timer_app_instance.current_date
+    timestamp = f"{current_date} {simulated_time}"
+    log_move(house_state, timestamp, int(click_x), int(click_y))
+
+    s_sensors = runtime_sources["sensors"]
+    if not s_sensors:
+        print("No sensors exists.")
+        return None
+
+    return {
+        "sim_state": sim_state,
+        "house_state": house_state,
+        "timestamp": timestamp,
+        "current_datetime": get_simulation_datetime(timer_app_instance),
+        "click_pos": (click_x, click_y),
+        "sensors": s_sensors,
+        "walls": runtime_sources["walls"],
+        "devices": runtime_sources["devices"],
+        "doors": runtime_sources["doors"],
+        "state_store": house_state.sensor_states(),
+    }
+
+
+def _run_interaction_flow(canvas, event, timer_app_instance, runtime_sources: dict, interaction_ctx: dict):
+    house_state = interaction_ctx["house_state"]
+    sim_state = interaction_ctx["sim_state"]
+    s_sensors = interaction_ctx["sensors"]
+    walls = interaction_ctx["walls"]
+    d_devices = interaction_ctx["devices"]
+    d_doors = interaction_ctx["doors"]
+    state_store = interaction_ctx["state_store"]
+    timestamp = interaction_ctx["timestamp"]
+    click_pos = interaction_ctx["click_pos"]
+
+    closest_sensor_pir = _handle_pir_interaction(
+        house_state,
+        sim_state,
+        s_sensors,
+        walls,
+        d_doors,
+        state_store,
+        timestamp,
+        click_pos,
+    )
+
+    if closest_sensor_pir:
+        _handle_device_toggle_at_click(
+            canvas,
+            house_state,
+            timer_app_instance,
+            runtime_sources,
+            click_pos,
+            render=False,
+        )
+    else:
+        closest_temperature_sensor = find_closest_sensor_without_intersection(click_pos, s_sensors, walls)
+        if closest_temperature_sensor:
+            _handle_device_toggle_at_click(
+                canvas,
+                house_state,
+                timer_app_instance,
+                runtime_sources,
+                click_pos,
+                render=False,
+            )
+
+    _handle_weight_interaction(house_state, s_sensors, state_store, timestamp, click_pos)
+    interaction_with_door(canvas, event, d_doors, render=False)
+    _handle_switch_interaction(house_state, d_doors, s_sensors, state_store, timestamp)
+    _render_interaction_scene(canvas, d_devices, s_sensors, d_doors)
+
+
 def initialize_avatar_image():
-    global avatar_image
     image = Image.open("images/omino.png")
     image = image.resize((20, 27))
-    avatar_image = ImageTk.PhotoImage(image)
+    return ImageTk.PhotoImage(image)
 
-def start_simulation(canvas, timer_app_instance, load_active, activity_label):
-    initialize_avatar_image()
+def start_simulation(canvas, timer_app_instance, activity_label, house_state: HouseState, runtime_sources: dict):
+    state = _sim_state(house_state)
+    if state["avatar_image"] is None:
+        state["avatar_image"] = initialize_avatar_image()
     if not timer_app_instance.is_running:
+        print("Simulation started.")
         timer_app_instance.start_stop()
         timer_app_instance.elapsed_time = timedelta()
     else:
-        print("Simulation started.")
-        update_sensors(canvas, timer_app_instance, load_active, activity_label)
+        print("Simulation already running.")
+        update_sensors(canvas, timer_app_instance, activity_label, house_state, runtime_sources)
 
 def stop_simulation(timer_app_instance):
     if timer_app_instance.is_running:
+        print("Simulation stopped.")
         timer_app_instance.start_stop()
         timer_app_instance.elapsed_time = timedelta()
     else:
-        print("Simulation stopped.")
+        print("Simulation already stopped.")
 
 def get_simulation_datetime(timer_app_instance):
     simulated_time = timer_app_instance.get_simulated_time()
@@ -75,159 +543,34 @@ def get_simulation_datetime(timer_app_instance):
     return datetime.strptime(f"{current_date} {simulated_time}", "%Y-%m-%d %H:%M")
 
 # Handle user click: move avatar, pick closest PIR in FOV, fallback actions, and logging.
-def interaction(canvas, timer_app_instance, event, load_active, activity_label):
-    global avatar_id, active_pir_sensors
-
-    x = canvas.canvasx(event.x)
-    y = canvas.canvasy(event.y)
-
-    if avatar_image is None:
-        initialize_avatar_image()
-
-    # Keep avatar visible even when the simulation is paused/stopped.
-    if avatar_id is not None:
-        canvas.delete(avatar_id)
-    avatar_id = canvas.create_image(x, y, image=avatar_image)
-
-    if not timer_app_instance.is_running:
-        print("Error: Simulation not started. Press 'Start Simulation' before interact.")
+def interaction(canvas, timer_app_instance, event, activity_label, house_state: HouseState, runtime_sources: dict):
+    interaction_ctx = _prepare_interaction_context(
+        canvas,
+        event,
+        timer_app_instance,
+        house_state,
+        runtime_sources,
+    )
+    if interaction_ctx is None:
         return
+    _run_interaction_flow(canvas, event, timer_app_instance, runtime_sources, interaction_ctx)
 
-    simulated_time = timer_app_instance.get_simulated_time()
-    current_date = timer_app_instance.current_date
-    timestamp = f"{current_date} {simulated_time}"
-    print(f"Time of pressure: {simulated_time} - Date: {current_date}")
-
-    log_move(timestamp, int(x), int(y))
-
-    # Choose which structures to use based on whether we have loaded the scenario or not
-    if load_active:
-        p_points = coordinates
-        s_sensors = read_sensors
-        walls = read_walls_coordinates
-        d_devices = read_devices
-        d_doors = read_doors
-    else:
-        p_points = points
-        s_sensors = sensors
-        walls = walls_coordinates
-        d_devices = devices
-        d_doors = doors
-
-    if not s_sensors:
-        print("No sensors exists.")
-        return
-
-    # PIR: Find the closest one in the FOV first and without walls/blocks
-    closest_sensor_pir = find_closest_sensor_within_fov((x, y), s_sensors, walls, d_doors, MAX_DISTANCE, FOV_ANGLE)
-
-    # turn off previous active PIRs, but NOT the one you are about to activate
-    if closest_sensor_pir:
-        for sensor in active_pir_sensors:
-            sensor_name_curr = sensor.name
-            closest_name = closest_sensor_pir.name
-            if sensor_name_curr == closest_name:
-                continue
-            name, state, s_sensors = changePIR(canvas, sensor, s_sensors, 0)
-            if name not in sensor_states:
-                sensor_states[name] = {'time': [], 'state': [], 'type': 'PIR'}
-            append_unique_binary(sensor_states[name], timestamp, state, 'PIR')
-            sx = int(sensor.x)
-            sy = int(sensor.y)
-            log_sensor_event(timestamp, name, "PIR", sx, sy, 0, "auto-off-prev")  # [LOG]
-
-    active_pir_sensors = []
-
-    if closest_sensor_pir:
-        # force ON (1) without toggle to avoid 0->1 in the same minute
-        name, state, s_sensors = changePIR(canvas, closest_sensor_pir, s_sensors, 1)
-        sen_sim.append((name, state, timestamp))
-        if name not in sensor_states:
-            sensor_states[name] = {'time': [], 'state': [], 'type': 'PIR'}
-        append_unique_binary(sensor_states[name], timestamp, state, 'PIR')
-        active_pir_sensors.append(closest_sensor_pir)
-        sx = int(closest_sensor_pir.x)
-        sy = int(closest_sensor_pir.y)
-        log_sensor_event(timestamp, name, "PIR", sx, sy, 1, "closest_in_fov")  # [LOG]
-
-        # Activate device if the user clicks on it with a few tolerance pixels
-        for device in d_devices:
-            dx, dy = device.x, device.y
-            if abs(dx - x) <= 5 and abs(dy - y) <= 5:
-                toggle_device_state(canvas, event, sensor_states, load_active, timer_app_instance, x, y)
-                break
-    else:
-        # Temperature: If no valid PIR, look for the nearest sensor without obstacles
-        closest_temperature_sensor = find_closest_sensor_without_intersection((x, y), s_sensors, walls)
-        if closest_temperature_sensor:
-            toggle_device_state(canvas, event, sensor_states, load_active, timer_app_instance)
-
-    # Weight: activate sensor if clicked close (within 10 px) otherwise turn off
-    for sensor in s_sensors:
-        sensor_type = sensor.type
-        if sensor_type == "Weight":
-            sx = sensor.x
-            sy = sensor.y
-            distance = calculate_distance(x, y, sx, sy)
-            if distance < 10:
-                name, state, s_sensors = ChangeWeight(canvas, sensor, s_sensors, 1)
-                if name not in sensor_states:
-                    sensor_states[name] = {'time': [], 'state': [], 'type': 'Weight'}
-                append_unique_binary(sensor_states[name], timestamp, state, 'Weight')
-                log_sensor_event(timestamp, name, "Weight", int(sx), int(sy), 1, "click_nearby")  # [LOG]
-            else:
-                name, state, s_sensors = ChangeWeight(canvas, sensor, s_sensors, 0)
-                if name not in sensor_states:
-                    sensor_states[name] = {'time': [], 'state': [], 'type': 'Weight'}
-                append_unique_binary(sensor_states[name], timestamp, state, 'Weight')
-                log_sensor_event(timestamp, name, "Weight", int(sx), int(sy), 0, "auto_off")  # [LOG]
-
-    # Doors + Switch
-    interaction_with_door(canvas, event, d_doors)
-
-    switches_by_door = find_switch_sensors_by_doors(d_doors, s_sensors)
-    for door, associated_sensors, door_state in switches_by_door:
-        for sensor in associated_sensors:
-            sw_name, sw_state, s_sensors = changeSwitch(canvas, sensor, s_sensors, door_state)
-            if sw_name not in sensor_states:
-                sensor_states[sw_name] = {'time': [], 'state': [], 'type': 'Switch'}
-            append_unique_binary(sensor_states[sw_name], timestamp, int(sw_state), 'Switch')
-            sx = int(sensor.x)
-            sy = int(sensor.y)
-            door_name = f"{door.x1},{door.y1}-{door.x2},{door.y2}"
-            log_sensor_event(timestamp, sw_name, "Switch", sx, sy, int(sw_state), f"sync_with_door:{door_name}")  # [LOG]
-            print(f"Interact with switch sensor: {sw_name}, State: {sw_state}, Door: {door_name}, Time: {simulated_time} - Date: {current_date}")
-
-    # Save updates (if necessary)
-    if load_active:
-        read_sensors[:] = s_sensors
-        read_devices[:] = d_devices
-    else:
-        sensors[:] = s_sensors
-        d_devices[:] = d_devices
-
-def toggle_device_state(canvas, event, sensor_states, load_active, timer_app_instance, x=None, y=None):
+def toggle_device_state(canvas, event, house_state, timer_app_instance, runtime_sources: dict, x=None, y=None, *, render=True):
     """toggle device state on click and log the event"""
+    if (x is None or y is None) and event is None:
+        raise ValueError("toggle_device_state requires either click coordinates or an event")
     if x is None or y is None:
         x = int(canvas.canvasx(event.x))
         y = int(canvas.canvasy(event.y))
 
-    if load_active:
-        s_sensors = read_sensors
-        d_devices = read_devices
-        walls = read_walls_coordinates
-        d_doors = read_doors
-    else:
-        s_sensors = sensors
-        d_devices = devices
-        walls = walls_coordinates
-        d_doors = doors
+    s_sensors = runtime_sources["sensors"]
+    d_devices = runtime_sources["devices"]
 
     simulated_time = timer_app_instance.get_simulated_time()
     current_date = timer_app_instance.current_date
     current_timestamp = f"{current_date} {simulated_time}"
     simulation_datetime = get_simulation_datetime(timer_app_instance)
-    OVEN_DISTANCE_THRESHOLD = 50
+    cycles_store = house_state.active_cycles()
 
     for i, device in enumerate(d_devices):
         dev_name, dx, dy, type_d, power, dev_state, min_c, max_c = device.name, device.x, device.y, device.type, device.power, device.state, device.min_consumption, device.max_consumption
@@ -239,10 +582,10 @@ def toggle_device_state(canvas, event, sensor_states, load_active, timer_app_ins
             if new_state == 1:
                 current_cons = min_c
                 cons_dir = 1
-                active_cycles[dev_name] = (simulation_datetime, type_d)
+                cycles_store[dev_name] = (simulation_datetime, type_d)
             else:
-                if type_d != "Fridge" and dev_name in active_cycles:
-                    del active_cycles[dev_name]
+                if type_d != "Fridge" and dev_name in cycles_store:
+                    del cycles_store[dev_name]
                 # Do not change current_cons for Fridge: continue the descent
 
             # Update device
@@ -250,34 +593,16 @@ def toggle_device_state(canvas, event, sensor_states, load_active, timer_app_ins
             device.current_consumption = current_cons
             device.consumption_direction = cons_dir
             
-            canvas.itemconfig(dev_name, fill="red" if new_state == 0 else "green")
+            if render and canvas is not None:
+                canvas.itemconfig(dev_name, fill="red" if new_state == 0 else "green")
 
             # toggle device
-            log_device_event(current_timestamp, dev_name, type_d, int(dx), int(dy), int(new_state), "user_toggle_at_click")  # [LOG]
-
-            for sensor in s_sensors:
-                sensor_type = sensor.type
-                if sensor_type == "Temperature":
-                    oven_active = False
-                    sensor_x = sensor.x
-                    sensor_y = sensor.y
-                    for dev in d_devices:
-                        dev_type = dev.type
-                        dev_state = dev.state
-                        if dev_type == "Oven" and dev_state == 1:
-                            device_x = dev.x
-                            device_y = dev.y
-                            distance = ((sensor_x - device_x) ** 2 + (sensor_y - device_y) ** 2) ** 0.5
-                            if distance <= OVEN_DISTANCE_THRESHOLD:
-                                oven_active = True
-                                break
-                    sensor_name, sensor_state, s_sensors = changeTemperature(canvas, sensor, s_sensors, 1 if oven_active else 0, 1.0, simulation_datetime, d_devices)
-                    update_sensor_states(sensor_name, sensor_state, sensor_states, current_timestamp)
+            log_device_event(house_state, current_timestamp, dev_name, type_d, int(dx), int(dy), int(new_state), "user_toggle_at_click")  # [LOG]
             break
 
-def update_sensors(canvas, timer_app_instance, load_active, activity_label, *, schedule_next=True, force=False, delta_override=None, fast=False):
+def update_sensors(canvas, timer_app_instance, activity_label, house_state: HouseState, runtime_sources: dict, *, schedule_next=True, force=False, delta_override=None, fast=False):
     """update sensors based on elapsed time and log events"""
-    global sensors, read_sensors, last_temp_elapsed
+    state = _sim_state(house_state)
 
     if (not timer_app_instance.is_running) and (not force):
         print("Error: Simulation not started.")
@@ -285,27 +610,19 @@ def update_sensors(canvas, timer_app_instance, load_active, activity_label, *, s
 
     ui_canvas = None if fast else canvas
 
-    if load_active:
-        s_sensors = read_sensors
-        d_devices = read_devices
-        walls = read_walls_coordinates
-        d_doors = read_doors
-    else:
-        s_sensors = sensors
-        d_devices = devices
-        walls = walls_coordinates
-        d_doors = doors
+    s_sensors = runtime_sources["sensors"]
+    d_devices = runtime_sources["devices"]
 
     current_elapsed = timer_app_instance.elapsed_time
-    if last_temp_elapsed is None:
-        last_temp_elapsed = current_elapsed
+    if state["last_temp_elapsed"] is None:
+        state["last_temp_elapsed"] = current_elapsed
 
     if delta_override is not None:
         delta_seconds = float(delta_override)
-        last_temp_elapsed = current_elapsed
+        state["last_temp_elapsed"] = current_elapsed
     else:
-        delta_seconds = (current_elapsed - last_temp_elapsed).total_seconds()
-        last_temp_elapsed = current_elapsed
+        delta_seconds = (current_elapsed - state["last_temp_elapsed"]).total_seconds()
+        state["last_temp_elapsed"] = current_elapsed
 
         if delta_seconds <= 0:
             delta_seconds = 1.0
@@ -313,189 +630,55 @@ def update_sensors(canvas, timer_app_instance, load_active, activity_label, *, s
     simulated_time = timer_app_instance.get_simulated_time()
     current_date = timer_app_instance.current_date
     timestamp = f"{current_date} {simulated_time}"
-    OVEN_DISTANCE_THRESHOLD = 50
-
     current_datetime = get_simulation_datetime(timer_app_instance)
 
-    # Dedup helper for smartmeter
-    def _append_unique_sample(buffer, ts, state_val, consumption_val=None):
-        def _to_float(v):
-            try:
-                return float(round(float(v), 2))
-            except Exception:
-                return float("nan")
-
-        state_float = _to_float(state_val)
-        buffer.setdefault('time', [])
-        buffer.setdefault('state', [])
-        if 'consumption' in buffer:
-            buffer.setdefault('consumption', [])
-
-        if buffer['time'] and buffer['time'][-1] == ts:
-            buffer['state'][-1] = state_float
-            if 'consumption' in buffer and consumption_val is not None:
-                buffer['consumption'][-1] = _to_float(consumption_val)
-        else:
-            buffer['time'].append(ts)
-            buffer['state'].append(state_float)
-            if 'consumption' in buffer and consumption_val is not None:
-                buffer['consumption'].append(_to_float(consumption_val))
-
-    # --- Temperature ---
-    for i in range(len(s_sensors)):
-        sensor = s_sensors[i]
-        sensor_type = sensor.type
-        if sensor_type == "Temperature":
-            sensor_x = sensor.x
-            sensor_y = sensor.y
-
-            oven_active = False
-            for device in d_devices:
-                dev_type = device.type
-                dev_state = device.state
-                if dev_type == "Oven" and dev_state == 1:
-                    device_x = device.x
-                    device_y = device.y
-                    dist = calculate_distance(sensor_x, sensor_y, device_x, device_y)
-                    if dist <= OVEN_DISTANCE_THRESHOLD:
-                        oven_active = True
-                        break
-
-            heating_factor = 1 if oven_active else 0
-            sensor_name, new_state, s_sensors = changeTemperature(
-                ui_canvas, sensor, s_sensors, heating_factor, delta_seconds, current_datetime, d_devices
-            )
-            update_sensor_states(sensor_name, new_state, sensor_states, timestamp)
-
-    # --- Smart Meter ---
-    updated_smartmeters = set()
-    for i in range(len(s_sensors)):
-        sensor = s_sensors[i]
-        sensor_type = sensor.type
-        if sensor_type == "Smart Meter":
-            sensor_name, new_consumption, s_sensors = changeSmartMeter(
-                ui_canvas, sensor, s_sensors, d_devices, delta_seconds, current_datetime
-            )
-
-            sensor_type_name = "Smart Meter"
-            associated_device = sensor.associated_device
-
-            if sensor_name not in sensor_states:
-                sensor_states[sensor_name] = {
-                    'time': [],
-                    'state': [],
-                    'consumption': [],
-                    'type': sensor_type_name,
-                    'associated_device': associated_device
-                }
-            else:
-                sensor_states[sensor_name].setdefault('type', sensor_type_name)
-                sensor_states[sensor_name].setdefault('associated_device', associated_device)
-                sensor_states[sensor_name].setdefault('consumption', [])
-
-            THRESHOLD_W = 1.0
-            bin_state = 1 if (new_consumption or 0.0) > THRESHOLD_W else 0
-
-            sensor_x = sensor.x
-            sensor_y = sensor.y
-
-            _append_unique_sample(
-                sensor_states[sensor_name],
-                timestamp,
-                bin_state,
-                round(new_consumption, 2)
-            )
-
-            log_sensor_event(
-                timestamp,
-                sensor_name,
-                "Smart Meter",
-                int(sensor_x),
-                int(sensor_y),
-                float(round(new_consumption, 2)),
-                f"device:{associated_device}"
-            )
-
-            updated_smartmeters.add(sensor_name)
-
-    # save updates
-    if load_active:
-        read_sensors = s_sensors
-    else:
-        sensors = s_sensors
-
+    house_state = _prepare_house_state(
+        house_state,
+        devices_list=d_devices,
+        delta_seconds=delta_seconds,
+        current_datetime=current_datetime,
+    )
+    state_store = house_state.sensor_states()
+    temperature_updates = _collect_temperature_updates(
+        house_state,
+        s_sensors,
+        d_devices,
+        delta_seconds=delta_seconds,
+        current_datetime=current_datetime,
+    )
+    _apply_temperature_state_updates(temperature_updates)
+    _store_temperature_updates(state_store, timestamp, temperature_updates)
     # update devices consumption
-    update_devices_consumption(ui_canvas, d_devices, delta_seconds, timer_app_instance)
+    update_devices_consumption(
+        ui_canvas,
+        d_devices,
+        delta_seconds,
+        timer_app_instance,
+        active_cycles_store=house_state.active_cycles(),
+    )
 
-    # snapshot device->smartmeter 
-    for device in d_devices:
-        dev_name, dev_type, state, current_cons = device.name, device.type, device.state, device.current_consumption
-        
-        for sensor in s_sensors:
-            sensor_type = sensor.type
-            associated_dev = sensor.associated_device
-            if sensor_type == "Smart Meter" and associated_dev == dev_name:
-                sensor_name = sensor.name
-                if sensor_name in updated_smartmeters:
-                    continue
+    # Smart Meter sensors must read the already-updated device consumption/state
+    # for the current tick; otherwise they can remain one step behind.
+    updated_smartmeters = _update_smartmeter_sensors(
+        house_state,
+        s_sensors,
+        state_store,
+        timestamp,
+        devices_list=d_devices,
+        delta_seconds=delta_seconds,
+        current_datetime=current_datetime,
+    )
 
-                if sensor_name not in sensor_states:
-                    sensor_states[sensor_name] = {
-                        'time': [],
-                        'state': [],
-                        'consumption': [],
-                        'type': 'Smart Meter',
-                        'associated_device': dev_name
-                    }
-                else:
-                    sensor_states[sensor_name].setdefault('consumption', [])
-
-                THRESHOLD_W = 1.0
-                bin_state = 1 if (current_cons or 0.0) > THRESHOLD_W else 0
-
-                sensor_x = sensor.x
-                sensor_y = sensor.y
-
-                _append_unique_sample(
-                    sensor_states[sensor_name],
-                    timestamp,
-                    bin_state,
-                    round(current_cons, 2)
-                )
-
-                log_sensor_event(
-                    timestamp,
-                    sensor_name,
-                    "Smart Meter",
-                    int(sensor_x),
-                    int(sensor_y),
-                    float(round(current_cons, 2)),
-                    f"device:{dev_name}"
-                )
-
-    # per-second sampling (PIR/Switch/Weight)
-    do_sample = PER_SECOND_SENSOR_SAMPLING
-    types_to_sample = PER_SECOND_SENSOR_TYPES
-
-    if do_sample and not fast:
-        for sensor in s_sensors:
-            sensor_type = sensor.type
-            if sensor_type in types_to_sample:
-                sensor_name = sensor.name
-                sx = int(sensor.x)
-                sy = int(sensor.y)
-                current_state = int(round(float(sensor.state)))
-
-                if sensor_name not in sensor_states:
-                    sensor_states[sensor_name] = {'time': [], 'state': [], 'type': sensor_type}
-                else:
-                    sensor_states[sensor_name].setdefault('type', sensor_type)
-
-                append_unique_binary(sensor_states[sensor_name], timestamp, current_state, sensor_type)
-                log_sensor_event(timestamp, sensor_name, sensor_type, sx, sy, int(current_state), "per-second-sample")
+    _snapshot_device_smartmeters(house_state, s_sensors, d_devices, state_store, timestamp, updated_smartmeters)
+    _sample_binary_sensors(house_state, s_sensors, state_store, timestamp, fast)
+    _render_device_states(canvas, d_devices)
+    _render_sensor_states(canvas, s_sensors)
 
     # normal scheduling
     if schedule_next and timer_app_instance.is_running and canvas is not None:
-        canvas.after(1000, lambda: update_sensors(canvas, timer_app_instance, load_active, activity_label))
+        canvas.after(
+            1000,
+            lambda: update_sensors(canvas, timer_app_instance, activity_label, house_state, runtime_sources),
+        )
 
         

@@ -6,55 +6,106 @@ from datetime import datetime
 from read import read_sensors
 from sensor import sensors
 from app.save_paths import (
-    create_new_save_session,
     ensure_saves_dir,
     get_or_create_current_save_session,
     get_session_subdir,
 )
 
-activity_log = []  # list of dictionaries: {"activity": . "start": . "end": .}
-active_activities = {}  # dict: {"cooking": "00:05", "laundry": "00:06"}
 
-def log_activity_start(name, start_time):
-    if name not in active_activities:
-        active_activities[name] = start_time
+def _activity_log_state(log_state: dict | None) -> dict:
+    if log_state is None:
+        return {
+            "activity_log": [],
+            "active_activities": {},
+        }
+    log_state.setdefault("activity_log", [])
+    log_state.setdefault("active_activities", {})
+    return log_state
+
+
+def _interaction_log_state(house_state_or_state):
+    if house_state_or_state is None:
+        return {
+            "interaction_session_dir": None,
+            "interaction_file_path": None,
+            "interaction_file": None,
+        }
+
+    if hasattr(house_state_or_state, "interaction_log_state"):
+        state = house_state_or_state.interaction_log_state()
+        state.setdefault("interaction_session_dir", None)
+        state.setdefault("interaction_file_path", None)
+        state.setdefault("interaction_file", None)
+        return state
+
+    house_state_or_state.setdefault("interaction_session_dir", None)
+    house_state_or_state.setdefault("interaction_file_path", None)
+    house_state_or_state.setdefault("interaction_file", None)
+    return house_state_or_state
+
+
+def log_activity_start(name, start_time, log_state):
+    state = _activity_log_state(log_state)
+    if name not in state["active_activities"]:
+        state["active_activities"][name] = start_time
         print(f"[LOG] Start Activity: {name} at {start_time}")
 
-def log_activity_end(name, end_time):
-    if name in active_activities:
-        start_time = active_activities.pop(name)
-        activity_log.append({
-            "activity": name,
-            "start": start_time,
-            "end": end_time
-        })
+def _append_or_merge_activity_entry(state: dict, name, start_time, end_time):
+    if state["activity_log"]:
+        last_entry = state["activity_log"][-1]
+        if last_entry["activity"] == name and last_entry["end"] == start_time:
+            last_entry["end"] = end_time
+            return False
+
+    state["activity_log"].append({
+        "activity": name,
+        "start": start_time,
+        "end": end_time,
+    })
+    return True
+
+def _compact_activity_log(entries):
+    compacted = []
+    for entry in entries:
+        if compacted:
+            last_entry = compacted[-1]
+            if last_entry["activity"] == entry["activity"] and last_entry["end"] == entry["start"]:
+                last_entry["end"] = entry["end"]
+                continue
+        compacted.append(dict(entry))
+    return compacted
+
+def log_activity_end(name, end_time, log_state):
+    state = _activity_log_state(log_state)
+    if name in state["active_activities"]:
+        start_time = state["active_activities"].pop(name)
+        _append_or_merge_activity_entry(state, name, start_time, end_time)
         print(f"[LOG] End activity: {name} at {end_time}")
     else:
         print(f"[WARNING] End of activity received for '{name}' but was not active.")
 
-def log_end_of_simulation(end_time):
+def log_end_of_simulation(end_time, log_state):
+    state = _activity_log_state(log_state)
     # Close all still active tasks with the simulation end time
-    for name, start in list(active_activities.items()):
-        activity_log.append({
-            "activity": name,
-            "start": start,
-            "end": end_time
-        })
+    for name, start in list(state["active_activities"].items()):
+        _append_or_merge_activity_entry(state, name, start, end_time)
         print(f"[LOG] Force close activity: {name} at {end_time}")
-    active_activities.clear()
+    state["active_activities"].clear()
 
-def save_activity_log(filename="activity_log.csv"):
+def save_activity_log(filename="activity_log.csv", log_state=None):
+    state = _activity_log_state(log_state)
     try:
         with open(filename, mode="w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
             writer.writerow(["activity", "start", "end"])
-            for entry in activity_log:
+            for entry in _compact_activity_log(state["activity_log"]):
                 writer.writerow([entry["activity"], entry["start"], entry["end"]])
         print(f"[LOG] Activity log saved in '{filename}'")
     except Exception as e:
         print(f"[ERROR] Saving failed: {e}")
 
-def show_activity_log():
+def show_activity_log(log_state):
+    state = _activity_log_state(log_state)
     log_window = tk.Toplevel()
     log_window.title("Activity log")
 
@@ -63,11 +114,13 @@ def show_activity_log():
     text_box = tk.Text(log_window, height=20, width=80)
     text_box.pack(pady=10)
 
-    if not activity_log:
+    compacted_log = _compact_activity_log(state["activity_log"])
+
+    if not compacted_log:
         text_box.insert(tk.END, "No activity recorded.\n")
     else:
         # print activity list in vertical column format
-        for i, entry in enumerate(activity_log, 1):
+        for i, entry in enumerate(compacted_log, 1):
             text_box.insert(tk.END, f"Activity {i}:\n")
             text_box.insert(tk.END, f"  Name:  {entry['activity']}\n")
             text_box.insert(tk.END, f"  Start: {entry['start']}\n")
@@ -78,7 +131,7 @@ def show_activity_log():
         session_dir = get_or_create_current_save_session(suffix="logs")
         activity_dir = get_session_subdir("activities", session_dir)
         file_path = activity_dir / "activity_log.csv"
-        save_activity_log(str(file_path))
+        save_activity_log(str(file_path), state)
         messagebox.showinfo("Success", f"Activity log saved in:\n{file_path}")
 
     tk.Button(log_window, text="Save activity log", command=save).pack(pady=10)
@@ -86,7 +139,8 @@ def show_activity_log():
 
 # sensor log
 
-def show_log(canvas, sensor_states, load_active):
+def show_log(canvas, sensor_states, load_active, log_state):
+    state = _activity_log_state(log_state)
     def _align_len(lst, target_len, fill=None):
         #Makes 'lst' long 'target_len' by filling with 'fill' or cutting
         if lst is None:
@@ -130,7 +184,7 @@ def show_log(canvas, sensor_states, load_active):
         else:
             if str(sensor_type).lower() == "smart meter":
                 consumption_list = _align_len(sensor_data.get('consumption'), len(time_list), fill=None)
-                text_box.insert(tk.END, "time\state\tconsumption\n")
+                text_box.insert(tk.END, "time\tstate\tconsumption\n")
                 for t, s, c in zip(time_list, state_list, consumption_list):
                     text_box.insert(tk.END, f"{t}\t{s}\t{c}\n")
             else:
@@ -246,11 +300,11 @@ def show_log(canvas, sensor_states, load_active):
             text_box = tk.Text(act_frame, height=22, width=100)
             text_box.pack(padx=10, pady=(0, 8), fill="both", expand=True)
 
-            if not activity_log:
+            if not state["activity_log"]:
                 text_box.insert(tk.END, "No activity recorded.\n")
             else:
                 text_box.insert(tk.END, "Activity\tStart\tEnd\n")
-                for entry in activity_log:
+                for entry in state["activity_log"]:
                     text_box.insert(tk.END, f"{entry['activity']}\t{entry['start']}\t{entry['end']}\n")
 
             def save_activity_log_tab():
@@ -265,7 +319,7 @@ def show_log(canvas, sensor_states, load_active):
                 if not out_path:
                     return
                 try:
-                    save_activity_log(out_path)
+                    save_activity_log(out_path, state)
                     messagebox.showinfo("Success", f"Activity log saved in:\n{out_path}")
                 except Exception as e:
                     messagebox.showerror("Error", f"Impossible to save activity log:\n{e}")
@@ -315,66 +369,66 @@ def show_log(canvas, sensor_states, load_active):
     tk.Button(buttons_frame, text="Open Preview", command=open_detail_window).grid(row=0, column=0, padx=5)
     tk.Button(buttons_frame, text="Save directly", command=save_selected_logs).grid(row=0, column=1, padx=5)
 
-_interaction_session_dir = None
-_interaction_file_path = None
-_interaction_file = None
-
-def start_interaction_log_session(session_label: str = ""):
-    global _interaction_session_dir, _interaction_file_path, _interaction_file
+def start_interaction_log_session(house_state, session_label: str = ""):
+    state = _interaction_log_state(house_state)
     suffix = "manual"
     if session_label:
         safe = str(session_label).replace(":", "").replace("/", "-").replace("\\", "-").strip()
         if safe:
             suffix = f"manual_{safe}"
 
-    session_dir = create_new_save_session(suffix=suffix)
-    _interaction_session_dir = str(session_dir)
+    # Reuse the same save session folder for the current app run.
+    session_dir = get_or_create_current_save_session(suffix=suffix)
+    state["interaction_session_dir"] = str(session_dir)
     interactions_dir = get_session_subdir("interactions", session_dir)
-    _interaction_file_path = str(interactions_dir / "interactions.csv")
-    _interaction_file = open(_interaction_file_path, mode="w", newline="", encoding="utf-8")
+    state["interaction_file_path"] = str(interactions_dir / "interactions.csv")
+    file_exists = os.path.exists(state["interaction_file_path"])
+    state["interaction_file"] = open(state["interaction_file_path"], mode="a", newline="", encoding="utf-8")
     import csv as _csv
-    writer = _csv.writer(_interaction_file)
-    writer.writerow(["timestamp_sim", "event_type", "subject", "name", "x", "y", "value", "extra"])
-    _interaction_file.flush()
-    print(f"[LOG] Interaction Session: {_interaction_file_path}")
+    writer = _csv.writer(state["interaction_file"])
+    # Write header only when creating the file for the first time.
+    if not file_exists or os.path.getsize(state["interaction_file_path"]) == 0:
+        writer.writerow(["timestamp_sim", "event_type", "subject", "name", "x", "y", "value", "extra"])
+    state["interaction_file"].flush()
+    print(f"[LOG] Interaction Session: {state['interaction_file_path']}")
 
-def stop_interaction_log_session():
-    global _interaction_file
+def stop_interaction_log_session(house_state):
+    state = _interaction_log_state(house_state)
     try:
-        if _interaction_file:
-            _interaction_file.flush()
-            _interaction_file.close()
-            _interaction_file = None
+        if state["interaction_file"]:
+            state["interaction_file"].flush()
+            state["interaction_file"].close()
+            state["interaction_file"] = None
             print("[LOG] Interaction Session closed.")
     except Exception as e:
         print(f"[ERROR] Closing Interaction Session: {e}")
 
-def append_interaction_row(row):
-    global _interaction_file
-    if _interaction_file is None:
+def append_interaction_row(house_state, row):
+    state = _interaction_log_state(house_state)
+    if state["interaction_file"] is None:
         # Ignore early events before the session file is opened.
         return
     try:
         import csv as _csv
-        writer = _csv.writer(_interaction_file)
+        writer = _csv.writer(state["interaction_file"])
         writer.writerow(row)
-        _interaction_file.flush()
+        state["interaction_file"].flush()
     except Exception as e:
         print(f"[ERROR] Writing interaction log: {e}")
 
-def log_move(timestamp_sim: str, x:int, y:int):
+def log_move(house_state, timestamp_sim: str, x:int, y:int):
     #Record a movement of the avatar
-    append_interaction_row([timestamp_sim, "move", "user", "", int(x), int(y), "", ""])
+    append_interaction_row(house_state, [timestamp_sim, "move", "user", "", int(x), int(y), "", ""])
 
-def log_sensor_event(timestamp_sim: str, name:str, sensor_type:str, x:int, y:int, value, extra:str=""):
+def log_sensor_event(house_state, timestamp_sim: str, name:str, sensor_type:str, x:int, y:int, value, extra:str=""):
     #Record a sensor event
-    append_interaction_row([timestamp_sim, "sensor", sensor_type, name, int(x), int(y), value, extra])
+    append_interaction_row(house_state, [timestamp_sim, "sensor", sensor_type, name, int(x), int(y), value, extra])
 
-def log_device_event(timestamp_sim: str, name:str, dev_type:str, x:int, y:int, state:int, extra:str=""):
+def log_device_event(house_state, timestamp_sim: str, name:str, dev_type:str, x:int, y:int, state:int, extra:str=""):
     #Record a device event on/off
-    append_interaction_row([timestamp_sim, "device", dev_type, name, int(x), int(y), state, extra])
+    append_interaction_row(house_state, [timestamp_sim, "device", dev_type, name, int(x), int(y), state, extra])
 
-def log_door_event(timestamp_sim: str, door_id:str, x1:int, y1:int, x2:int, y2:int, state:int):
+def log_door_event(house_state, timestamp_sim: str, door_id:str, x1:int, y1:int, x2:int, y2:int, state:int):
     #Record interaction with the door
     extra = f"({x1},{y1})-({x2},{y2})"
-    append_interaction_row([timestamp_sim, "door", "door", door_id, "", "", state, extra])
+    append_interaction_row(house_state, [timestamp_sim, "door", "door", door_id, "", "", state, extra])
