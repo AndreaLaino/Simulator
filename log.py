@@ -51,11 +51,13 @@ def log_activity_start(name, start_time, log_state):
         print(f"[LOG] Start Activity: {name} at {start_time}")
 
 def _append_or_merge_activity_entry(state: dict, name, start_time, end_time):
-    if state["activity_log"]:
-        last_entry = state["activity_log"][-1]
-        if last_entry["activity"] == name and last_entry["end"] == start_time:
-            last_entry["end"] = end_time
+    for entry in reversed(state["activity_log"]):
+        if entry["activity"] != name:
+            continue
+        if entry["end"] == start_time:
+            entry["end"] = end_time
             return False
+        break
 
     state["activity_log"].append({
         "activity": name,
@@ -67,11 +69,16 @@ def _append_or_merge_activity_entry(state: dict, name, start_time, end_time):
 def _compact_activity_log(entries):
     compacted = []
     for entry in entries:
-        if compacted:
-            last_entry = compacted[-1]
-            if last_entry["activity"] == entry["activity"] and last_entry["end"] == entry["start"]:
-                last_entry["end"] = entry["end"]
+        merged = False
+        for existing in reversed(compacted):
+            if existing["activity"] != entry["activity"]:
                 continue
+            if existing["end"] == entry["start"]:
+                existing["end"] = entry["end"]
+                merged = True
+            break
+        if merged:
+            continue
         compacted.append(dict(entry))
     return compacted
 

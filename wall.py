@@ -2,6 +2,7 @@ import tkinter as tk
 from point import points
 from read import read_walls_coordinates, coordinates, read_walls
 from models import Point, Wall
+from utils import raise_overlay_labels
 
 walls: list[Wall] = []
 walls_coordinates: list[Wall] = []
@@ -37,8 +38,9 @@ def draw_line_window(canvas, window, load_active):
         # If both points exist, draw the line
         if coord_point1 and coord_point2:
             wall = Wall(x1=coord_point1[0], y1=coord_point1[1], x2=coord_point2[0], y2=coord_point2[1])
-            canvas.create_line(wall.x1, wall.y1, wall.x2, wall.y2, fill="red", width=3, tags='wall')
+            canvas.create_line(wall.x1, wall.y1, wall.x2, wall.y2, fill="black", width=3, tags='wall')
             walls_coordinates.append(wall)
+            raise_overlay_labels(canvas)
             window_line.destroy()
 
     # Dialog to input point names

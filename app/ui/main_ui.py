@@ -44,7 +44,15 @@ def _activity_log_store(ctx: AppContext) -> dict:
 
 
 def _load_image(canvas_obj: tk.Canvas, file_path: str):
-    image = Image.open(file_path).resize((1200, 1200))
+    image = Image.open(file_path)
+    max_size = 1200
+    width, height = image.size
+    scale = min(max_size / width, max_size / height)
+
+    if scale < 1:
+        resized_size = (int(width * scale), int(height * scale))
+        image = image.resize(resized_size, Image.Resampling.LANCZOS)
+
     photo = ImageTk.PhotoImage(image)
     canvas_obj.create_image(0, 0, anchor=tk.NW, image=photo, tags="background_image")
     canvas_obj.image = photo

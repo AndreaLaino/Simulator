@@ -82,7 +82,15 @@ def draw_sensor(canvas, sensor):
     rect_tag = f'{name}_rect_sensor'
     text_tag = f'{name}_text_sensor'
     canvas.create_rectangle(x - 5, y - 5, x + 5, y + 5, fill=color, tags=('sensor', rect_tag))
-    canvas.create_text(x+7, y, text=name, fill=color, anchor=tk.SW, tags=('sensor', text_tag))
+    canvas.create_text(x+7, y, text=name, fill=color, anchor=tk.SW, tags=('sensor', 'sensor_label', text_tag))
+    raise_overlay_labels(canvas)
+
+
+def raise_overlay_labels(canvas):
+    if canvas is None:
+        return
+    canvas.tag_raise('sensor_label')
+    canvas.tag_raise('device_label')
 
 def calculate_distance(x1, y1, x2, y2):
     return math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)

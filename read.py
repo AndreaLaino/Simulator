@@ -1,5 +1,5 @@
 import tkinter as tk
-from utils import draw_sensor
+from utils import draw_sensor, raise_overlay_labels
 import csv
 from models import Point, Sensor, Device, Door, Wall
 
@@ -153,8 +153,9 @@ read_walls_coordinates: list[Wall] = []
 def draw_walls(read_walls, coordinates, canvas):
     read_walls_coordinates.clear()
     for wall in read_walls:
-        canvas.create_line(wall.x1, wall.y1, wall.x2, wall.y2, fill="red", width=3, tags='wall')
+        canvas.create_line(wall.x1, wall.y1, wall.x2, wall.y2, fill="black", width=3, tags='wall')
         read_walls_coordinates.append(wall)
+    raise_overlay_labels(canvas)
 
 def draw_sensors(read_sensors, canvas):
     for sensor in read_sensors:
@@ -165,7 +166,8 @@ def draw_devices(read_devices, canvas):
         name, x, y, type, state = device.name, device.x, device.y, device.type, device.state
         color = "red" if state == 0 else "green"
         canvas.create_oval(x - 5, y - 5, x + 5, y + 5, fill=color, tags=(name, 'device'))
-        canvas.create_text(x+7, y, text=f"{name} ({type})", fill=color, anchor=tk.SW, tags=(name, 'device'))
+        canvas.create_text(x+7, y, text=f"{name} ({type})", fill=color, anchor=tk.SW, tags=(name, 'device', 'device_label'))
+    raise_overlay_labels(canvas)
 
 def draw_doors(read_doors, canvas):
     for door in read_doors:

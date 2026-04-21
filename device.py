@@ -3,6 +3,7 @@ from tkinter import simpledialog, messagebox
 from tkinter import ttk
 from read import read_devices as device_file
 from models import Device
+from utils import raise_overlay_labels
 
 devices = []
 
@@ -91,4 +92,5 @@ def draw_device(canvas, device):
     name, x, y, type, state = device.name, device.x, device.y, device.type, device.state
     color = "red" if state == 0 else "green"
     canvas.create_oval(x - 5, y - 5, x + 5, y + 5, fill=color, tags=(name, 'device'))
-    canvas.create_text(x+7, y, text=f"{name} ({type})", fill=color, anchor=tk.SW, tags=(name, 'device'))
+    canvas.create_text(x+7, y, text=f"{name} ({type})", fill=color, anchor=tk.SW, tags=(name, 'device', 'device_label'))
+    raise_overlay_labels(canvas)

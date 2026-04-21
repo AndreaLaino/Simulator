@@ -10,6 +10,7 @@ FOV_ANGLE = 60  # degrees for PIR field-of-view checks
 RADIUS_STANDARD = 150   # px distance for "closest sensor within FOV"
 MEAL_MIN_DURATION = 10  # simulated seconds to confirm meal
 SLEEP_MIN_DURATION = 10  # simulated seconds with Weight=1 near bed
+EXIT_MOTION_WINDOW = 10  # simulated seconds of recent PIR motion required before leaving home
 
 
 def _activity_state(house_state: HouseState) -> dict:
@@ -31,6 +32,7 @@ def _activity_state(house_state: HouseState) -> dict:
     state.setdefault("meal_active", None)
     state.setdefault("sleep_weight_start", {})
     state.setdefault("exit_last_edge_idx", -1)
+    state.setdefault("last_pir_motion_time", None)
     return state
 
 
@@ -172,8 +174,20 @@ def detect_exiting_home(sensor_states, sensors, timer_app_instance, state: dict)
     exit_time = state.get("exit_time")
     exit_activated = bool(state.get("exit_activated", False))
     exit_last_edge_idx = int(state.get("exit_last_edge_idx", -1))
+    last_pir_motion_time = state.get("last_pir_motion_time")
 
     now = timer_app_instance.get_simulated_time()
+    now_elapsed = timer_app_instance.elapsed_time
+
+    any_pir_active = False
+    for s in sensors:
+        if s.type == "PIR":
+            seq = sensor_states.get(s.name, {}).get("state", [])
+            if seq and seq[-1] == 1:
+                any_pir_active = True
+                break
+    if any_pir_active:
+        last_pir_motion_time = now_elapsed
 
 
     entrance_state = None
@@ -194,12 +208,17 @@ def detect_exiting_home(sensor_states, sensors, timer_app_instance, state: dict)
 
         if last_edge_idx is not None and last_edge_idx > exit_last_edge_idx:
             exit_last_edge_idx = last_edge_idx
-            exit_triggered = True
-            exit_time = timer_app_instance.elapsed_time
+            recent_motion = (
+                last_pir_motion_time is not None and
+                (now_elapsed - last_pir_motion_time).total_seconds() <= EXIT_MOTION_WINDOW
+            )
+            if recent_motion:
+                exit_triggered = True
+                exit_time = now_elapsed
 
     #  After the trigger: wait 5s and check PIR all at 0
     if exit_triggered and not exit_activated:
-        delta = (timer_app_instance.elapsed_time - exit_time).total_seconds()
+        delta = (now_elapsed - exit_time).total_seconds()
         if delta >= 5:
             exit_triggered = False
             # checks that all PIRs are at 0 (last seen state)
@@ -216,6 +235,7 @@ def detect_exiting_home(sensor_states, sensors, timer_app_instance, state: dict)
                 state["exit_time"] = exit_time
                 state["exit_activated"] = exit_activated
                 state["exit_last_edge_idx"] = exit_last_edge_idx
+                state["last_pir_motion_time"] = last_pir_motion_time
                 return "Leaving home"
 
     # If already out, keep reporting activity
@@ -224,12 +244,14 @@ def detect_exiting_home(sensor_states, sensors, timer_app_instance, state: dict)
         state["exit_time"] = exit_time
         state["exit_activated"] = exit_activated
         state["exit_last_edge_idx"] = exit_last_edge_idx
+        state["last_pir_motion_time"] = last_pir_motion_time
         return "Leaving home"
 
     state["exit_triggered"] = exit_triggered
     state["exit_time"] = exit_time
     state["exit_activated"] = exit_activated
     state["exit_last_edge_idx"] = exit_last_edge_idx
+    state["last_pir_motion_time"] = last_pir_motion_time
     return None
 
 def detect_entering_home(sensor_states, sensors, timer_app_instance, activity_label=None, state: dict | None = None):
