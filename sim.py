@@ -9,6 +9,7 @@ from sensor import (
     WeightSensorAdapter,
     SwitchSensorAdapter,
     is_temperature_sensor_changing,
+    prime_llm_cycle_for_sensor,
 )
 from utils import find_closest_sensor_within_fov, update_devices_consumption, find_closest_sensor_without_intersection, find_switch_sensors_by_doors, calculate_distance, update_sensor_color, update_temperature_sensor_color
 from common import update_sensor_states
@@ -571,6 +572,7 @@ def toggle_device_state(canvas, event, house_state, timer_app_instance, runtime_
     current_timestamp = f"{current_date} {simulated_time}"
     simulation_datetime = get_simulation_datetime(timer_app_instance)
     cycles_store = house_state.active_cycles()
+    smartmeter_sensors = [s for s in s_sensors if s.type == "Smart Meter"]
 
     for i, device in enumerate(d_devices):
         dev_name, dx, dy, type_d, power, dev_state, min_c, max_c = device.name, device.x, device.y, device.type, device.power, device.state, device.min_consumption, device.max_consumption
@@ -582,7 +584,16 @@ def toggle_device_state(canvas, event, house_state, timer_app_instance, runtime_
             if new_state == 1:
                 current_cons = min_c
                 cons_dir = 1
-                cycles_store[dev_name] = (simulation_datetime, type_d)
+                cycle_entry = {
+                    "start_time": simulation_datetime,
+                    "cycle_type": type_d,
+                }
+                assoc_sensor = next((s for s in smartmeter_sensors if s.associated_device == dev_name), None)
+                if assoc_sensor is not None:
+                    llm_cycle = prime_llm_cycle_for_sensor(assoc_sensor.name, type_d, simulation_datetime)
+                    if isinstance(llm_cycle, dict):
+                        cycle_entry["llm"] = llm_cycle
+                cycles_store[dev_name] = cycle_entry
             else:
                 if type_d != "Fridge" and dev_name in cycles_store:
                     del cycles_store[dev_name]

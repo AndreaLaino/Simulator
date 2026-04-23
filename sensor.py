@@ -31,6 +31,10 @@ LLM_PROFILE_CATALOG_MTIME: Optional[float] = None
 LLM_PROFILE_CATALOG_ACTIVE_PATH: Optional[Path] = None
 LLM_CYCLE_CURVE_CACHE: dict[tuple[str, int], Optional[tuple[list[float], list[float]]]] = {}
 LLM_SENSOR_ON_START: dict[str, datetime] = {}
+LLM_CLUSTER_CASES_CACHE: dict[tuple[str, str, int], Optional[pd.DataFrame]] = {}
+LLM_SENSOR_ACTIVE_CYCLE_ID: dict[str, int] = {}
+LLM_WM_DAY_CURSOR: dict[str, dict] = {}
+LLM_SENSOR_USED_CASES: dict[str, list[dict[str, int]]] = {}
 
 sensors = []
 add_point_enabled = False
@@ -711,7 +715,8 @@ def _resolve_llm_catalog_path(value: str | Path | None) -> Path:
     if value is None:
         return Path()
 
-    path = Path(value)
+    raw = str(value).replace("\\", "/")
+    path = Path(raw)
     if path.is_absolute():
         return path
 
@@ -750,6 +755,8 @@ def _load_llm_profile_catalog() -> dict:
         data = json.loads(catalog_path.read_text(encoding="utf-8"))
         if not isinstance(data, dict):
             data = {}
+        LLM_CYCLE_CURVE_CACHE.clear()
+        LLM_CLUSTER_CASES_CACHE.clear()
         LLM_PROFILE_CATALOG_CACHE = data
         LLM_PROFILE_CATALOG_MTIME = mtime
         LLM_PROFILE_CATALOG_ACTIVE_PATH = catalog_path
@@ -760,9 +767,17 @@ def _load_llm_profile_catalog() -> dict:
 
 def _load_llm_cycle_curve(profile: dict) -> Optional[tuple[list[float], list[float]]]:
     """Load selected cycle (minutes, power_W) from LLM runtime pkl by cycle_id."""
+    return _load_llm_cycle_curve_for_cycle_id(profile)
+
+
+def _load_llm_cycle_curve_for_cycle_id(
+    profile: dict,
+    cycle_id_override: Optional[int] = None,
+) -> Optional[tuple[list[float], list[float]]]:
+    """Load selected cycle (minutes, power_W) from LLM runtime pkl by cycle_id."""
     try:
         appliance_key = str(profile.get("appliance_key") or "").strip()
-        cycle_id = int(profile.get("selected_cycle_id"))
+        cycle_id = int(profile.get("selected_cycle_id") if cycle_id_override is None else cycle_id_override)
         pkl_path = _resolve_llm_catalog_path(str(profile.get("pkl_path") or "").strip())
     except Exception:
         return None
@@ -822,6 +837,196 @@ def _load_llm_cycle_curve(profile: dict) -> Optional[tuple[list[float], list[flo
     return out
 
 
+def _load_llm_cluster_cases(profile: dict) -> Optional[pd.DataFrame]:
+    try:
+        appliance_key = str(profile.get("appliance_key") or "").strip()
+        chosen_k = int(profile.get("chosen_k"))
+        output_dir = _resolve_llm_catalog_path(str(profile.get("output_dir") or "").strip())
+    except Exception:
+        return None
+
+    cache_key = (appliance_key, str(output_dir), chosen_k)
+    if cache_key in LLM_CLUSTER_CASES_CACHE:
+        return LLM_CLUSTER_CASES_CACHE[cache_key]
+
+    clusters_path = output_dir / f"results_k{chosen_k}" / "clusters.csv"
+    if not clusters_path.is_file():
+        LLM_CLUSTER_CASES_CACHE[cache_key] = None
+        return None
+
+    try:
+        df = pd.read_csv(clusters_path)
+    except Exception:
+        LLM_CLUSTER_CASES_CACHE[cache_key] = None
+        return None
+
+    required_cols = {"cycle_id", "start_time", "end_time", "cluster"}
+    if df.empty or not required_cols.issubset(df.columns):
+        LLM_CLUSTER_CASES_CACHE[cache_key] = None
+        return None
+
+    work = df.copy()
+    work["cycle_id"] = pd.to_numeric(work["cycle_id"], errors="coerce")
+    work["cluster"] = pd.to_numeric(work["cluster"], errors="coerce")
+    work["start_time"] = pd.to_datetime(work["start_time"], errors="coerce")
+    work["end_time"] = pd.to_datetime(work["end_time"], errors="coerce")
+    work = work.dropna(subset=["cycle_id", "cluster", "start_time", "end_time"]).reset_index(drop=True)
+    if work.empty:
+        LLM_CLUSTER_CASES_CACHE[cache_key] = None
+        return None
+
+    work["cycle_id"] = work["cycle_id"].astype(int)
+    work["cluster"] = work["cluster"].astype(int)
+    work["weekday"] = work["start_time"].dt.weekday
+    LLM_CLUSTER_CASES_CACHE[cache_key] = work
+    return work
+
+
+def _select_washing_machine_cycle_id(profile: dict, sensor_name: str, now_dt: datetime) -> Optional[int]:
+    cases_df = _load_llm_cluster_cases(profile)
+    if cases_df is None or cases_df.empty:
+        return None
+
+    sim_date = now_dt.date().isoformat()
+    weekday = int(now_dt.weekday())
+    weekday_cases = cases_df[cases_df["weekday"] == weekday].copy()
+    if weekday_cases.empty:
+        return None
+
+    counts = (
+        weekday_cases.groupby("cluster", as_index=False)
+        .agg(n_cycles=("cycle_id", "count"))
+        .sort_values(["n_cycles", "cluster"], ascending=[False, True], kind="mergesort")
+        .reset_index(drop=True)
+    )
+    if counts.empty:
+        return None
+
+    chosen_cluster = int(counts.iloc[0]["cluster"])
+    cluster_cases = (
+        weekday_cases[weekday_cases["cluster"] == chosen_cluster]
+        .sort_values(["start_time", "end_time", "cycle_id"], kind="mergesort")
+        .reset_index(drop=True)
+    )
+    if cluster_cases.empty:
+        return None
+
+    cycle_ids = [int(v) for v in cluster_cases["cycle_id"].tolist()]
+    cursor = LLM_WM_DAY_CURSOR.get(sensor_name)
+
+    if (
+        not isinstance(cursor, dict)
+        or cursor.get("sim_date") != sim_date
+        or int(cursor.get("weekday", -1)) != weekday
+        or int(cursor.get("cluster", -1)) != chosen_cluster
+        or list(cursor.get("cycle_ids") or []) != cycle_ids
+    ):
+        cursor = {
+            "sim_date": sim_date,
+            "weekday": weekday,
+            "cluster": chosen_cluster,
+            "cycle_ids": cycle_ids,
+            "next_index": 0,
+        }
+
+    next_index = int(cursor.get("next_index", 0))
+    if next_index < 0:
+        next_index = 0
+
+    selected_cycle_id = cycle_ids[next_index % len(cycle_ids)]
+    cursor["next_index"] = (next_index + 1) % len(cycle_ids)
+    LLM_WM_DAY_CURSOR[sensor_name] = cursor
+    return selected_cycle_id
+
+
+def _cluster_for_cycle_id(profile: dict, cycle_id: int) -> Optional[int]:
+    cases_df = _load_llm_cluster_cases(profile)
+    if cases_df is None or cases_df.empty:
+        return None
+    match = cases_df[cases_df["cycle_id"] == int(cycle_id)]
+    if match.empty:
+        return None
+    try:
+        return int(match.iloc[0]["cluster"])
+    except Exception:
+        return None
+
+
+def _record_llm_used_case(sensor_name: str, cycle_id: int, cluster_id: Optional[int]) -> None:
+    used = LLM_SENSOR_USED_CASES.setdefault(sensor_name, [])
+    used.append({
+        "cycle_id": int(cycle_id),
+        "cluster": int(cluster_id) if cluster_id is not None else -1,
+    })
+
+
+def get_llm_used_cases(sensor_name: str) -> list[dict[str, int]]:
+    return [dict(item) for item in LLM_SENSOR_USED_CASES.get(sensor_name, [])]
+
+
+def _duration_minutes_for_cycle_id(profile: dict, cycle_id: int) -> Optional[float]:
+    cases_df = _load_llm_cluster_cases(profile)
+    if cases_df is not None and not cases_df.empty and "duration_minutes" in cases_df.columns:
+        match = cases_df[cases_df["cycle_id"] == int(cycle_id)]
+        if not match.empty:
+            try:
+                duration = float(match.iloc[0]["duration_minutes"])
+                if duration > 0:
+                    return duration
+            except Exception:
+                pass
+
+    curve = _load_llm_cycle_curve_for_cycle_id(profile, cycle_id_override=cycle_id)
+    if not curve:
+        return None
+    minutes_axis, _values_axis = curve
+    if not minutes_axis:
+        return None
+    try:
+        duration = float(minutes_axis[-1])
+        return duration if duration > 0 else None
+    except Exception:
+        return None
+
+
+def prime_llm_cycle_for_sensor(sensor_name: str, dev_type: Optional[str], start_dt: Optional[datetime]) -> Optional[dict]:
+    appliance_key = _device_type_to_appliance_key(dev_type)
+    if not appliance_key:
+        return None
+
+    catalog = _load_llm_profile_catalog()
+    profile = catalog.get(appliance_key) if isinstance(catalog, dict) else None
+    if not isinstance(profile, dict):
+        return None
+
+    now_dt = start_dt or datetime.now()
+    cycle_id: Optional[int] = None
+    if appliance_key == "washing_machine":
+        cycle_id = _select_washing_machine_cycle_id(profile, sensor_name, now_dt)
+    if cycle_id is None:
+        try:
+            cycle_id = int(profile.get("selected_cycle_id"))
+        except Exception:
+            cycle_id = None
+    if cycle_id is None:
+        return None
+
+    cluster_id = _cluster_for_cycle_id(profile, int(cycle_id))
+    duration_minutes = _duration_minutes_for_cycle_id(profile, int(cycle_id))
+
+    LLM_SENSOR_ON_START[sensor_name] = now_dt
+    LLM_SENSOR_ACTIVE_CYCLE_ID[sensor_name] = int(cycle_id)
+    _record_llm_used_case(sensor_name, int(cycle_id), cluster_id)
+
+    return {
+        "sensor_name": sensor_name,
+        "appliance_key": appliance_key,
+        "cycle_id": int(cycle_id),
+        "cluster": int(cluster_id) if cluster_id is not None else None,
+        "duration_minutes": float(duration_minutes) if duration_minutes is not None else None,
+    }
+
+
 def _interp_cycle_value(minutes_axis: list[float], values_axis: list[float], elapsed_min: float) -> float:
     if not minutes_axis or not values_axis:
         return 0.0
@@ -866,15 +1071,20 @@ def _get_llm_smartmeter_consumption(
 
     if dev_state != 1:
         LLM_SENSOR_ON_START.pop(sensor_name, None)
+        LLM_SENSOR_ACTIVE_CYCLE_ID.pop(sensor_name, None)
         return 0.0
 
-    start_dt = LLM_SENSOR_ON_START.get(sensor_name)
     now_dt = current_datetime or datetime.now()
+    start_dt = LLM_SENSOR_ON_START.get(sensor_name)
     if start_dt is None:
-        LLM_SENSOR_ON_START[sensor_name] = now_dt
-        start_dt = now_dt
+        primed = prime_llm_cycle_for_sensor(sensor_name, dev_type, now_dt)
+        start_dt = LLM_SENSOR_ON_START.get(sensor_name, now_dt)
+        if primed is None and appliance_key != "washing_machine":
+            LLM_SENSOR_ON_START[sensor_name] = now_dt
+            start_dt = now_dt
 
-    curve = _load_llm_cycle_curve(profile)
+    cycle_id_override = LLM_SENSOR_ACTIVE_CYCLE_ID.get(sensor_name)
+    curve = _load_llm_cycle_curve_for_cycle_id(profile, cycle_id_override=cycle_id_override)
     if not curve:
         return None
 

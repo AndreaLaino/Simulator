@@ -138,6 +138,14 @@ def profile_value_linear(profile: dict, minutes: float, standby: float) -> float
     return float(interpolated_consumption(profile, minutes, standby))
 
 
+def _active_cycle_parts(entry):
+    if isinstance(entry, dict):
+        return entry.get("start_time"), entry.get("cycle_type"), entry.get("llm")
+    if isinstance(entry, (tuple, list)) and len(entry) >= 2:
+        return entry[0], entry[1], None
+    return None, None, None
+
+
 
 def get_device_consumption(device_name, device_type, current_timestamp, active_cycles, device_state=1, *, add_random_noise: bool = True) -> float:
     """Get the power consumption (W) of a device at the given timestamp."""
@@ -168,12 +176,23 @@ def get_device_consumption(device_name, device_type, current_timestamp, active_c
 
     # If in an active cycle, evaluate profile at elapsed minutes
     if device_name in active_cycles:
-        start_time, _cycle_type = active_cycles[device_name]
+        start_time, _cycle_type, llm_meta = _active_cycle_parts(active_cycles[device_name])
+        if start_time is None:
+            return standby
         elapsed_min = (current_timestamp - start_time).total_seconds() / 60.0
+
+        llm_duration = None
+        if isinstance(llm_meta, dict):
+            try:
+                llm_duration = float(llm_meta.get("duration_minutes"))
+            except Exception:
+                llm_duration = None
 
         # handle looping / bounds
         keys = sorted(prof_det) if prof_det else []
         duration = float(keys[-1]) if keys else 0.0
+        if llm_duration is not None and llm_duration > 0:
+            duration = llm_duration
 
         t = elapsed_min
         if repeat and duration > 0:

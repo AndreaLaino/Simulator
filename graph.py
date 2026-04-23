@@ -15,7 +15,7 @@ from matplotlib.ticker import MaxNLocator, FormatStrFormatter
 import numpy as np
 import pandas as pd
 
-from sensor import sensors
+from sensor import sensors, get_llm_used_cases
 from consumption_profiles import consumption_profiles
 from read import read_sensors, read_devices
 from device import devices
@@ -160,6 +160,7 @@ def _llm_info_for_smartmeter(sensor_name: str, sensor_states: dict) -> dict:
     if isinstance(payload, dict):
         out = dict(payload)
         out.setdefault("source", "llm_profile_json")
+        out["used_cases"] = get_llm_used_cases(sensor_name)
         if "output_dir" in out:
             out["output_dir"] = _resolve_llm_path(str(out.get("output_dir") or ""))
         if "pkl_path" not in out and "output_dir" in out:
@@ -524,11 +525,22 @@ def _draw_smartmeter_info_box(ax, info: dict):
             f"appliance: {info.get('appliance_key', '?')}",
         ]
         if info.get("source") == "llm_profile_json":
+            used_cases = info.get("used_cases") or []
+            if used_cases:
+                used_cases_line = "cases: " + ", ".join(
+                    f"case_{item.get('cycle_id', '?')}(cluster_{item.get('cluster', '?')})"
+                    for item in used_cases
+                )
+            else:
+                used_cases_line = (
+                    f"cases: case_{info.get('selected_cycle_id', '?')}(cluster_{info.get('selected_cluster', '?')})"
+                )
             lines.extend([
                 f"k: {info.get('chosen_k', '?')}",
                 f"dominant cluster: {info.get('dominant_cluster', '?')} (n={info.get('dominant_cluster_n_cycles', '?')})",
                 f"selected cluster: {info.get('selected_cluster', '?')}",
                 f"selected cycle: {info.get('selected_cycle_id', '?')}",
+                used_cases_line,
             ])
         else:
             lines.extend([

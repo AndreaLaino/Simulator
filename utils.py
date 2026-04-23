@@ -279,9 +279,25 @@ def update_devices_consumption(canvas, devices, delta_seconds, timer_app_instanc
 
         if state == 1:
             if name in active_cycles_store:
-                start_time, cycle_type = active_cycles_store[name]
+                cycle_entry = active_cycles_store[name]
+                if isinstance(cycle_entry, dict):
+                    start_time = cycle_entry.get("start_time")
+                    cycle_type = cycle_entry.get("cycle_type")
+                    llm_meta = cycle_entry.get("llm")
+                else:
+                    start_time, cycle_type = cycle_entry
+                    llm_meta = None
+                if start_time is None or cycle_type is None:
+                    continue
                 elapsed_min = (current_datetime - start_time).total_seconds() / 60.0
                 profile_duration = max(consumption_profiles[cycle_type]["profile"].keys())
+                if isinstance(llm_meta, dict):
+                    try:
+                        llm_duration = float(llm_meta.get("duration_minutes"))
+                        if llm_duration > 0:
+                            profile_duration = llm_duration
+                    except Exception:
+                        pass
 
                 # At end of profile: for non-continuous devices, turn OFF and close cycle.
                 # Continuous: Refrigerator, Computer and Oven continue in duration module.
