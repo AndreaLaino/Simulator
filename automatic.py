@@ -1,5 +1,6 @@
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import messagebox, ttk
+from app.io.safe_dialog import ask_directory, ask_open_file, ask_open_files, ask_save_file
 import os
 import pandas as pd
 
@@ -69,7 +70,7 @@ def _auto_state(ctx: AppContext) -> dict:
 def select_folder(ctx: AppContext):
     state = _auto_state(ctx)
 
-    folder_path = filedialog.askdirectory(title="Select the folder with the data files")
+    folder_path = ask_directory(title="Select the folder with the data files")
     if not folder_path:
         return
     state["selected_folder_path"] = folder_path
@@ -201,10 +202,7 @@ def clear_all(ctx: AppContext):
 def select_path_csv(ctx: AppContext):
     state = _auto_state(ctx)
 
-    path = filedialog.askopenfilename(
-        title="Select file",
-        filetypes=[("CSV", "*.csv"), ("All files", "*.*")]
-    )
+    path = ask_open_file(title="Select file", filetypes=[("CSV", "*.csv"), ("All files", "*.*")])
     if not path:
         return
 
@@ -366,12 +364,10 @@ def export_logs_from_csv_ctx(ctx: AppContext):
         safe_name = f"{subj}_{name}".replace(" ", "_")
         default_name = f"{safe_name}_from_interactions.csv"
 
-        out_path = filedialog.asksaveasfilename(
+        out_path = ask_save_file(
             title=f"Choose file name for {subj} — {name}",
-            defaultextension=".csv",
             initialdir=last_dir,
-            initialfile=default_name,
-            filetypes=[("CSV", "*.csv")]
+            filetypes=[("CSV", "*.csv")],
         )
         if not out_path:
             skipped += 1

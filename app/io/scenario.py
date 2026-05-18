@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import os, csv, shutil, json, glob
-from tkinter import messagebox, filedialog, simpledialog
+from tkinter import messagebox, simpledialog
+from app.io.safe_dialog import ask_open_file, ask_open_files, ask_save_file, ask_directory
 import tkinter as tk
 from tkinter import ttk
 from datetime import datetime
@@ -268,12 +269,13 @@ def _load_scenario(ctx: AppContext, canvas, filename: str) -> None:
     draw_devices(ctx.read_devices, canvas)
     draw_doors(ctx.read_doors, canvas)
 
-    # Auto-start Smart Meter loggers only after scenario sensors are available.
+    # Auto-start real sensor loggers only after scenario sensors are available.
     try:
-        from app.ui.bindings import autostart_bound_ip_loggers
+        from app.ui.bindings import autostart_bound_gpio_loggers, autostart_bound_ip_loggers
         autostart_bound_ip_loggers(ctx.house_state.sensor_states())
+        autostart_bound_gpio_loggers(ctx.house_state.sensor_states())
     except Exception as e:
-        logger.warning("SmartMeter autostart after scenario load failed: %s", e)
+        logger.warning("Real sensor autostart after scenario load failed: %s", e)
 
     logger.info("Scenario loaded from %s", filename)
 
@@ -386,10 +388,9 @@ def delete_scenario(ctx: AppContext, canvas) -> None:
 
 def open_scenario(ctx: AppContext, canvas) -> None:
     """Open... – let the user choose the scenario file to open."""
-    filename = filedialog.askopenfilename(
+    filename = ask_open_file(
         title="Open scenario",
-        defaultextension=".csv",
-        filetypes=[("Scenario files", "*.csv"), ("All files", "*.*")]
+        filetypes=[("Scenario files", "*.csv"), ("All files", "*.*")],
     )
     if not filename:
         return  # user cancelled
@@ -746,9 +747,9 @@ def import_csv_from_s3(parent=None) -> None:
 
 def import_csv(parent=None) -> None:
     """Import sensor CSV files from local filesystem."""
-    files = filedialog.askopenfilenames(
+    files = ask_open_files(
         title="Import CSV files",
-        filetypes=[("CSV files", "*.csv"), ("All files", "*.*")]
+        filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
     )
     if not files:
         return
@@ -878,11 +879,10 @@ def export_simulation_csv() -> None:
     candidates.sort(reverse=True)
     src_csv = candidates[0][1]
 
-    dest = filedialog.asksaveasfilename(
+    dest = ask_save_file(
         title="Export simulation (CSV)",
-        defaultextension=".csv",
         initialfile="simulation_interactions.csv",
-        filetypes=[("CSV", "*.csv"), ("All files", "*.*")]
+        filetypes=[("CSV", "*.csv"), ("All files", "*.*")],
     )
     if not dest:
         return
@@ -899,12 +899,12 @@ def export_simulation_csv() -> None:
 def save_scenario_as(ctx: AppContext) -> None:
     """Save As... – always ask for a new file path."""
     houses_dir = ensure_houses_dir()
-    filename = filedialog.asksaveasfilename(
+    filename = ask_save_file(
         title="Save scenario as",
         defaultextension=".csv",
         initialfile="saved.csv",
         initialdir=str(houses_dir),
-        filetypes=[("Scenario files", "*.csv"), ("All files", "*.*")]
+        filetypes=[("Scenario files", "*.csv"), ("All files", "*.*")],
     )
     if not filename:
         return

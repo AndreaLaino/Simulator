@@ -1,5 +1,6 @@
 import tkinter as tk
-from tkinter import messagebox, ttk, filedialog
+from tkinter import messagebox, ttk
+from app.io.safe_dialog import ask_save_file
 import csv
 import os
 from datetime import datetime
@@ -207,10 +208,8 @@ def show_log(canvas, sensor_states, load_active, log_state):
 
             default_name = f"{sensore_name}_log.csv".replace(" ", "_")
             saves_dir = ensure_saves_dir()
-            out_path = filedialog.asksaveasfilename(
+            out_path = ask_save_file(
                 title=f"Save log for {sensore_name}",
-                defaultextension=".csv",
-                initialfile=default_name,
                 initialdir=str(saves_dir),
                 filetypes=[("CSV", "*.csv")]
             )
@@ -316,10 +315,8 @@ def show_log(canvas, sensor_states, load_active, log_state):
 
             def save_activity_log_tab():
                 saves_dir = ensure_saves_dir()
-                out_path = filedialog.asksaveasfilename(
+                out_path = ask_save_file(
                     title="Save activity log",
-                    defaultextension=".csv",
-                    initialfile="activity_log.csv",
                     initialdir=str(saves_dir),
                     filetypes=[("CSV", "*.csv")]
                 )

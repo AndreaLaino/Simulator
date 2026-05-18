@@ -3,7 +3,7 @@ from __future__ import annotations
 import pickle
 from collections import Counter
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import matplotlib
 matplotlib.use("Agg")
@@ -25,6 +25,15 @@ STD_COLOR_RAW = "0.75"
 STD_COLOR_MEAN = "tab:blue"
 STD_COLOR_REP = "tab:orange"
 STD_CMAP = "viridis"
+
+
+ProgressCallback = Callable[[float, str], None]
+
+
+def _emit_progress(progress_callback: ProgressCallback | None, percent: float, message: str) -> None:
+    if progress_callback is None:
+        return
+    progress_callback(max(0.0, min(100.0, float(percent))), message)
 
 
 def build_cycles_raw_data(
@@ -338,7 +347,15 @@ def _run_and_save(
     meta_df: pd.DataFrame,
     curve_features: np.ndarray,
     output_dir: Path,
+    progress_callback: ProgressCallback | None = None,
+    progress_start: float = 0.0,
+    progress_end: float = 100.0,
 ) -> None:
+    def _local_progress(fraction: float, message: str) -> None:
+        percent = progress_start + (progress_end - progress_start) * max(0.0, min(1.0, fraction))
+        _emit_progress(progress_callback, percent, message)
+
+    _local_progress(0.0, f"Clustering k={k}: assigning cycles")
     out_dir = output_dir / f"results_k{k}"
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -393,10 +410,12 @@ def _run_and_save(
         )
 
     rep_df = pd.DataFrame(reps)
+    _local_progress(0.30, f"Clustering k={k}: writing CSV files")
     local_meta.to_csv(out_dir / "clusters.csv", index=False)
     summary.to_csv(out_dir / "cluster_summary.csv")
     rep_df.to_csv(out_dir / "cluster_representatives.csv", index=False)
 
+    _local_progress(0.45, f"Clustering k={k}: saving heatmap")
     # Heatmap ordinata per cluster
     order = np.argsort(lbl)
     D_sorted = D_hybrid[order][:, order]
@@ -410,7 +429,12 @@ def _run_and_save(
     plt.close(fig)
 
     time_axis = np.linspace(0, 1, curve_features.shape[1])
-    for c in sorted(np.unique(lbl)):
+    clusters = sorted(np.unique(lbl))
+    for idx_c, c in enumerate(clusters):
+        _local_progress(
+            0.55 + 0.40 * (idx_c / max(1, len(clusters))),
+            f"Clustering k={k}: saving cluster {int(c)} chart",
+        )
         rep_cycle_id = rep_df.loc[rep_df["cluster"] == c, "cycle_id"].values[0]
         rep_idx = local_meta.index[local_meta["cycle_id"] == rep_cycle_id][0]
         idx = np.where(lbl == c)[0]
@@ -434,6 +458,7 @@ def _run_and_save(
         ax.legend()
         fig.savefig(out_dir / f"cluster_{c}_overview.png", dpi=150, bbox_inches="tight")
         plt.close(fig)
+    _local_progress(1.0, f"Clustering k={k}: complete")
 
 
 def run_cycle_pipeline(
@@ -443,8 +468,10 @@ def run_cycle_pipeline(
     chart_title_prefix: str,
     params: dict[str, Any],
     exact_k: int | None,
+    progress_callback: ProgressCallback | None = None,
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
+    _emit_progress(progress_callback, 0, "Preparing cycle pipeline")
 
     c = params["cycle"]
     f = params["features"]
@@ -454,6 +481,7 @@ def run_cycle_pipeline(
     if bool(c.get("force_rebuild_pkl", False)) or not pkl_path.exists():
         if not input_path.exists():
             raise FileNotFoundError(f"File sorgente non trovato: {input_path}")
+        _emit_progress(progress_callback, 4, "Extracting cycles from source data")
         cycles_to_save = build_cycles_raw_data(
             input_path=input_path,
             threshold=float(c["threshold_watts"]),
@@ -464,7 +492,9 @@ def run_cycle_pipeline(
         )
         with open(pkl_path, "wb") as fp:
             pickle.dump(cycles_to_save, fp)
+        _emit_progress(progress_callback, 10, f"Saved {len(cycles_to_save)} extracted cycles")
 
+    _emit_progress(progress_callback, 12, "Loading extracted cycles")
     with open(pkl_path, "rb") as fp:
         cycles: list[dict[str, Any]] = pickle.load(fp)
 
@@ -484,7 +514,13 @@ def run_cycle_pipeline(
     curve_features: list[np.ndarray] = []
     meta_rows: list[dict[str, Any]] = []
 
-    for cycle in cycles:
+    for idx_cycle, cycle in enumerate(cycles):
+        if idx_cycle == 0 or idx_cycle == len(cycles) - 1 or idx_cycle % max(1, len(cycles) // 20) == 0:
+            _emit_progress(
+                progress_callback,
+                15 + 15 * (idx_cycle / max(1, len(cycles))),
+                f"Computing cycle features {idx_cycle + 1}/{len(cycles)}",
+            )
         df = extract_cycle_df(cycle)
         df_shape = trim_cycle_for_shape(df, max_minutes=max_analysis_minutes)
         y_resampled = resample_curve(df_shape, target_len=target_len)
@@ -515,17 +551,73 @@ def run_cycle_pipeline(
                 "time_of_peak_norm": time_of_peak_norm,
             }
         )
+    _emit_progress(progress_callback, 30, "Cycle features ready")
 
     X_curve = np.array(curve_features, dtype=np.double)
     meta_df = pd.DataFrame(meta_rows)
 
+    _emit_progress(progress_callback, 33, "Scaling global features")
     global_cols = ["duration_minutes", "max_power", "mean_power", "energy_kwh", "time_of_peak_norm"]
     global_scaled = StandardScaler().fit_transform(meta_df[global_cols].values.astype(float))
 
+    _emit_progress(progress_callback, 36, "Computing DTW distance matrix")
     series_list = [np.asarray(x, dtype=np.double) for x in X_curve]
-    D_dtw_condensed = dtw.distance_matrix_fast(series_list, compact=True)
+
+    # Lightweight validation to catch malformed series that can cause C-extension
+    # conversions to overflow on some platforms (e.g. 32-bit ssize_t).
+    try:
+        problems: list[tuple[int, str, object]] = []
+        lens = []
+        stats = []
+        for i, s in enumerate(series_list):
+            # ensure 1-D numeric array
+            if not isinstance(s, np.ndarray):
+                problems.append((i, "not_ndarray", type(s)))
+                continue
+            if s.ndim != 1:
+                problems.append((i, "ndim", int(s.ndim)))
+            # extremely large sizes are suspicious on constrained platforms
+            if s.size > 10_000_000:
+                problems.append((i, "large_size", int(s.size)))
+            # check for non-finite values
+            nonfinite = int(np.sum(~np.isfinite(s)))
+            if nonfinite > 0:
+                problems.append((i, "nonfinite", nonfinite))
+            # gather stats
+            try:
+                amin = float(np.nanmin(s))
+                amax = float(np.nanmax(s))
+                amean = float(np.nanmean(s))
+            except Exception:
+                amin = amax = amean = float("nan")
+            lens.append(int(s.size))
+            stats.append((i, str(s.dtype), tuple(s.shape), int(s.nbytes), amin, amax, amean))
+
+        # Print a concise summary and the per-series stats for the first 20 series
+        print(f"DTW series summary: n_series={len(series_list)}, sample_lens={lens[:10]}")
+        for st in stats[:20]:
+            print(f"series[{st[0]}]: dtype={st[1]}, shape={st[2]}, nbytes={st[3]}, min={st[4]}, max={st[5]}, mean={st[6]}")
+
+        if problems:
+            print("DTW series validation problems:", problems)
+    except Exception as _ex:
+        # If validation crashes, continue to call DTW and allow original error to surface
+        print("DTW series validation failed:", type(_ex).__name__, _ex)
+
+    # Prefer the fast C implementation but gracefully fall back to the
+    # pure-Python implementation if the C-extension raises errors on this platform.
+    try:
+        D_dtw_condensed = dtw.distance_matrix_fast(series_list, compact=True)
+    except OverflowError as oe:
+        print("DTW C-extension OverflowError, falling back to Python implementation:", oe)
+        D_dtw_condensed = dtw.distance_matrix(series_list, compact=True, use_c=False)
+    except Exception as ex:
+        # Catch other possible C-extension issues (e.g., ValueError from conversion)
+        print("DTW C-extension failed, falling back to Python implementation:", type(ex).__name__, ex)
+        D_dtw_condensed = dtw.distance_matrix(series_list, compact=True, use_c=False)
     D_dtw = squareform(D_dtw_condensed)
 
+    _emit_progress(progress_callback, 48, "Computing global distance matrix")
     D_global_condensed = pdist(global_scaled, metric="euclidean")
     D_global = squareform(D_global_condensed)
 
@@ -535,6 +627,7 @@ def run_cycle_pipeline(
     D_hybrid = float(h["alpha"]) * D_dtw_norm + float(h["beta"]) * D_global_norm
     D_hybrid_condensed = squareform(D_hybrid, checks=False)
 
+    _emit_progress(progress_callback, 52, "Saving distance heatmap")
     fig = plt.figure(figsize=(10, 8))
     plt.imshow(D_hybrid, aspect="auto", cmap=STD_CMAP)
     plt.colorbar(label="Hybrid distance")
@@ -544,6 +637,7 @@ def run_cycle_pipeline(
     fig.savefig(output_dir / "distance_heatmap.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
 
+    _emit_progress(progress_callback, 56, "Building dendrogram")
     Z = linkage(D_hybrid_condensed, method="average")
 
     fig = plt.figure(figsize=(16, 6))
@@ -554,7 +648,9 @@ def run_cycle_pipeline(
     fig.savefig(output_dir / "dendrogram.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
 
+    _emit_progress(progress_callback, 62, "Scoring possible k values")
     scores_df, picks = _compute_k_scores(Z, D_hybrid, global_scaled, k_cfg, len(cycles))
+    _emit_progress(progress_callback, 66, "Writing optimal k report")
     with open(output_dir / "optimal_k_report.txt", "w", encoding="utf-8") as fout:
         fout.write("=== Optimal k detection report ===\n\n")
         fout.write(f"Elbow acceleration  -> k = {picks['k_accel']}\n")
@@ -566,13 +662,38 @@ def run_cycle_pipeline(
         fout.write(scores_df.to_string(index=False))
 
     if exact_k is not None:
-        _run_and_save(exact_k, "exact", Z, D_hybrid, meta_df, X_curve, output_dir)
+        _run_and_save(
+            exact_k,
+            "exact",
+            Z,
+            D_hybrid,
+            meta_df,
+            X_curve,
+            output_dir,
+            progress_callback=progress_callback,
+            progress_start=68,
+            progress_end=100,
+        )
         print(f"Eseguito clustering a k fisso esatto: k={exact_k}")
     else:
         k_to_run: list[int] = []
         for candidate in [picks["k_accel"], picks["k_sil"], picks["k_db"], picks["k_ch"], picks["k_human"]]:
             if candidate not in k_to_run:
                 k_to_run.append(candidate)
-        for k in k_to_run:
-            _run_and_save(k, "auto", Z, D_hybrid, meta_df, X_curve, output_dir)
+        for idx_k, k in enumerate(k_to_run):
+            span_start = 68 + 32 * (idx_k / max(1, len(k_to_run)))
+            span_end = 68 + 32 * ((idx_k + 1) / max(1, len(k_to_run)))
+            _run_and_save(
+                k,
+                "auto",
+                Z,
+                D_hybrid,
+                meta_df,
+                X_curve,
+                output_dir,
+                progress_callback=progress_callback,
+                progress_start=span_start,
+                progress_end=span_end,
+            )
         print(f"Eseguiti cluster automatici: {k_to_run}")
+    _emit_progress(progress_callback, 100, "Cycle pipeline complete")

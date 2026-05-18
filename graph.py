@@ -3,6 +3,7 @@ import csv
 import json
 import glob
 import pickle
+import re
 import tkinter as tk
 from tkinter import messagebox
 from tkinter import ttk
@@ -19,7 +20,7 @@ from sensor import sensors, get_llm_used_cases
 from consumption_profiles import consumption_profiles
 from read import read_sensors, read_devices
 from device import devices
-import dhtlogger
+from app.hardware import real_sensors
 from models import Sensor, Device
 
 plt.rcParams.update({
@@ -149,6 +150,82 @@ def _device_type_for_name(device_name: str | None) -> str | None:
     return None
 
 
+def _normalize_profile_token(value: str | None) -> str:
+    cleaned = re.sub(r"[^a-z0-9]+", "_", str(value or "").strip().lower())
+    return cleaned.strip("_")
+
+
+def _profile_source_token(payload: dict) -> str:
+    source_name = str(payload.get("source_name") or "").strip()
+    if source_name:
+        return _normalize_profile_token(source_name)
+    output_dir = str(payload.get("output_dir") or "").strip()
+    if output_dir:
+        name = Path(output_dir).name
+        if name.endswith("_output"):
+            name = name[: -len("_output")]
+        return _normalize_profile_token(name)
+    return ""
+
+
+def _profile_match_score(payload: dict, candidates: set[str]) -> int:
+    source_token = _profile_source_token(payload)
+    if not source_token:
+        return 0
+    if source_token in candidates:
+        return 100
+    for candidate in candidates:
+        if not candidate:
+            continue
+        if source_token.endswith(candidate) or candidate.endswith(source_token):
+            return 80
+        if candidate in source_token or source_token in candidate:
+            return 60
+    return 0
+
+
+def _profile_candidates_for_sensor(sensor_name: str, associated_device: str | None) -> set[str]:
+    raw_values = {
+        sensor_name,
+        associated_device or "",
+        f"smartmeter_{sensor_name}",
+        f"smartmeter_{associated_device}" if associated_device else "",
+    }
+    return {_normalize_profile_token(value) for value in raw_values if _normalize_profile_token(value)}
+
+
+def _profile_for_smartmeter(
+    profiles: dict,
+    appliance_key: str,
+    sensor_name: str,
+    associated_device: str | None,
+) -> tuple[dict | None, str]:
+    candidates = _profile_candidates_for_sensor(sensor_name, associated_device)
+    by_source = profiles.get("by_source")
+    appliance_profiles: list[dict] = []
+    if isinstance(by_source, dict):
+        for payload in by_source.values():
+            if isinstance(payload, dict) and str(payload.get("appliance_key") or "") == appliance_key:
+                appliance_profiles.append(payload)
+
+    scored = [
+        (_profile_match_score(payload, candidates), payload)
+        for payload in appliance_profiles
+    ]
+    scored = [(score, payload) for score, payload in scored if score > 0]
+    if scored:
+        scored.sort(key=lambda item: item[0], reverse=True)
+        return scored[0][1], "llm_profile_by_source"
+
+    if len(appliance_profiles) == 1:
+        return appliance_profiles[0], "llm_profile_by_source_single"
+
+    payload = profiles.get(appliance_key)
+    if isinstance(payload, dict):
+        return payload, "llm_profile_json"
+    return None, ""
+
+
 def _llm_info_for_smartmeter(sensor_name: str, sensor_states: dict) -> dict:
     profiles = _load_llm_profiles()
     associated_device = _associated_device_name(sensor_name, sensor_states)
@@ -156,10 +233,11 @@ def _llm_info_for_smartmeter(sensor_name: str, sensor_states: dict) -> dict:
     appliance_key = _appliance_key_from_device_type(device_type)
     if not appliance_key:
         return {}
-    payload = profiles.get(appliance_key)
+    payload, source = _profile_for_smartmeter(profiles, appliance_key, sensor_name, associated_device)
     if isinstance(payload, dict):
         out = dict(payload)
-        out.setdefault("source", "llm_profile_json")
+        out.setdefault("source", source or "llm_profile_json")
+        out.setdefault("associated_device", associated_device)
         out["used_cases"] = get_llm_used_cases(sensor_name)
         if "output_dir" in out:
             out["output_dir"] = _resolve_llm_path(str(out.get("output_dir") or ""))
@@ -707,6 +785,21 @@ def _get_binding_dht_gpio(sensor_name: str) -> int | None:
     return None
 
 
+def _get_binding_gpio(sensor_name: str, expected_kind: str | None = None) -> tuple[int, str] | None:
+    """Get GPIO binding for PIR, Switch, and Weight sensors."""
+    mp = _load_sensor_map()
+    v = mp.get(sensor_name)
+    if not isinstance(v, dict) or v.get("by") != "gpio":
+        return None
+    kind = str(v.get("kind") or expected_kind or "").strip().lower()
+    if expected_kind and kind != expected_kind:
+        return None
+    try:
+        return int(v.get("gpio")), kind
+    except Exception:
+        return None
+
+
 def _get_binding_ip(sensor_name: str) -> str | None:
     """Get IP binding for smart meter sensor"""
     mp = _load_sensor_map()
@@ -769,7 +862,13 @@ def show_graphs(canvas, sensor_states):
         if sensor_type == "Temperature":
             gpio = _get_binding_dht_gpio(sensor)
             if gpio is not None:
-                df_real = dhtlogger.load_temp_by_gpio_any_csv(gpio, logs_dir="devices")
+                df_real = real_sensors.load_temp_by_gpio_any_csv(gpio, logs_dir="devices")
+        elif sensor_type in ("PIR", "Switch", "Weight"):
+            kind = sensor_type.lower()
+            binding = _get_binding_gpio(sensor, kind)
+            if binding is not None:
+                gpio, real_kind = binding
+                df_real = real_sensors.load_value_by_gpio_any_csv(gpio, real_kind, logs_dir="devices")
         elif sensor_type == "Smart Meter":
             # Smart Meter "real" overlay is intentionally disabled.
             df_real = pd.DataFrame()
@@ -941,7 +1040,13 @@ def show_graphs_auto(sensor_states, selected_keys, target_frame):
         if sensor_type == "Temperature":
             gpio = _get_binding_dht_gpio(sensor)
             if gpio is not None:
-                df_real = dhtlogger.load_temp_by_gpio_any_csv(gpio, logs_dir="devices")
+                df_real = real_sensors.load_temp_by_gpio_any_csv(gpio, logs_dir="devices")
+        elif sensor_type in ("PIR", "Switch", "Weight"):
+            kind = sensor_type.lower()
+            binding = _get_binding_gpio(sensor, kind)
+            if binding is not None:
+                gpio, real_kind = binding
+                df_real = real_sensors.load_value_by_gpio_any_csv(gpio, real_kind, logs_dir="devices")
         elif sensor_type == "Smart Meter":
             # Smart Meter "real" overlay is intentionally disabled.
             df_real = pd.DataFrame()

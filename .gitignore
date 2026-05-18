@@ -61,4 +61,11 @@ Thumbs.db
 /saves/
 llm_smartmeter_profiles.json
 **/*_case_output/
+/LLM/smartmeter/*/*_output/
 /devices/
+
+# Local hardware/user configuration
+/sensor_map.json
+
+# User-created scenario files
+/houses/

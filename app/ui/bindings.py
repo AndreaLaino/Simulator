@@ -33,6 +33,9 @@ def _sensor_type(name: str, sensor_states: dict) -> str | None:
 def _is_smart_meter_sensor(name: str, sensor_states: dict) -> bool:
     return _sensor_type(name, sensor_states) == "Smart Meter"
 
+def _is_sensor_type(name: str, sensor_states: dict, wanted_type: str) -> bool:
+    return _sensor_type(name, sensor_states) == wanted_type
+
 def _all_sensor_names(sensor_states: dict) -> list[str]:
     names = set()
     try:
@@ -151,7 +154,7 @@ def autostart_bound_ip_loggers(sensor_states: dict):
     }
 
     try:
-        from smartmeter import start_logger, csv_path_for_device
+        from app.hardware.smartmeter import start_logger, csv_path_for_device
     except Exception as e:
         logger.warning("Cannot import smartmeter logger APIs: %s", e)
         return
@@ -174,7 +177,7 @@ def autostart_bound_ip_loggers(sensor_states: dict):
             start_logger(
                 device_name=display_name,
                 ip=ip,
-                interval=60,
+                interval=int(cfg.get("interval", 10) or 10),
                 device_id=sensor_name,
                 csv_path=csv_path_for_device(sensor_name),
             )
@@ -185,6 +188,53 @@ def autostart_bound_ip_loggers(sensor_states: dict):
     if started:
         logger.info("[SmartMeter] auto-started %d logger(s) from sensor_map.json", started)
 
+
+def autostart_bound_gpio_loggers(sensor_states: dict):
+    """Start DHT, PIR, Switch, and Weight GPIO loggers from persisted mappings."""
+    mapping = _load_sensor_map_json()
+    if not mapping:
+        return
+
+    valid_sensor_names = {
+        n for n in _all_sensor_names(sensor_states)
+        if _sensor_type(n, sensor_states) in GPIO_BINDABLE_TYPES
+    }
+
+    try:
+        from app.hardware.real_sensors import start_bound_logger
+    except Exception as e:
+        logger.warning("Cannot import GPIO logger APIs: %s", e)
+        return
+
+    started = 0
+    for sensor_name, cfg in mapping.items():
+        if valid_sensor_names and sensor_name not in valid_sensor_names:
+            continue
+        if not isinstance(cfg, dict) or cfg.get("by") not in ("dht", "gpio"):
+            continue
+
+        try:
+            gpio = int(cfg.get("gpio"))
+        except Exception:
+            continue
+
+        kind = (cfg.get("kind") or _binding_kind_for_type(_sensor_type(sensor_name, sensor_states) or "")).strip()
+        try:
+            start_bound_logger(
+                sensor_label=sensor_name,
+                kind=kind,
+                gpio=gpio,
+                interval=int(cfg.get("interval", 10) or 10),
+                pull_up=bool(cfg.get("pull_up", False)),
+                active_low=bool(cfg.get("active_low", False)),
+            )
+            started += 1
+        except Exception as e:
+            logger.warning("Cannot auto-start %s logger for %s on GPIO %s: %s", kind, sensor_name, gpio, e)
+
+    if started:
+        logger.info("[GPIO] auto-started %d logger(s) from sensor_map.json", started)
+
 # ---------- Smart Meter (IP) ----------
 
 def open_bind_ip_ui(root_win: tk.Tk, sensor_states: dict):
@@ -194,8 +244,8 @@ def open_bind_ip_ui(root_win: tk.Tk, sensor_states: dict):
     Optionally auto-start the logger.
     """
     win = tk.Toplevel(root_win)
-    win.title("Bind Smart Meter to real IP")
-    win.geometry("640x520")
+    win.title("Bind by IP")
+    win.geometry("760x520")
 
     all_names = _all_sensor_names(sensor_states)
     sm_names = [n for n in all_names if _is_smart_meter_sensor(n, sensor_states)]
@@ -207,23 +257,29 @@ def open_bind_ip_ui(root_win: tk.Tk, sensor_states: dict):
     canv.configure(yscrollcommand=vsb.set)
     inner = tk.Frame(canv); canv.create_window((0,0), window=inner, anchor="nw")
 
-    header = tk.Frame(inner); header.pack(fill="x", pady=(0,6))
-    tk.Label(header, text="Sensor (Smart Meter)", width=28, anchor="w", font=("Helvetica", 10, "bold")).grid(row=0, column=0, sticky="w")
-    tk.Label(header, text="Real IP", width=24, anchor="w", font=("Helvetica", 10, "bold")).grid(row=0, column=1, sticky="w")
+    inner.grid_columnconfigure(0, minsize=260)
+    inner.grid_columnconfigure(1, minsize=220)
+    inner.grid_columnconfigure(2, minsize=120)
+    tk.Label(inner, text="Sensor (Smart Meter)", anchor="w", font=("Helvetica", 10, "bold")).grid(row=0, column=0, sticky="ew", padx=(0, 12), pady=(0, 8))
+    tk.Label(inner, text="Real IP", anchor="w", font=("Helvetica", 10, "bold")).grid(row=0, column=1, sticky="ew", padx=(0, 12), pady=(0, 8))
+    tk.Label(inner, text="Interval (s)", anchor="w", font=("Helvetica", 10, "bold")).grid(row=0, column=2, sticky="ew", pady=(0, 8))
 
     rows = []
-    for name in sm_names:
-        row = tk.Frame(inner); row.pack(fill="x", pady=4)
-        tk.Label(row, text=name, width=28, anchor="w").grid(row=0, column=0, sticky="w")
+    for row_idx, name in enumerate(sm_names, start=1):
+        tk.Label(inner, text=name, anchor="w").grid(row=row_idx, column=0, sticky="ew", padx=(0, 12), pady=4)
 
         init_ip = ""
+        init_interval = "10"
         v = current.get(name)
         if isinstance(v, dict) and v.get("by") == "ip":
             init_ip = v.get("value") or ""
+            init_interval = str(v.get("interval") or "10")
 
         var_ip = tk.StringVar(value=init_ip)
-        tk.Entry(row, textvariable=var_ip, width=24).grid(row=0, column=1, sticky="w", padx=(10,0))
-        rows.append((name, var_ip))
+        var_interval = tk.StringVar(value=init_interval)
+        tk.Entry(inner, textvariable=var_ip, width=24).grid(row=row_idx, column=1, sticky="ew", padx=(0, 12), pady=4)
+        tk.Entry(inner, textvariable=var_interval, width=12).grid(row=row_idx, column=2, sticky="ew", pady=4)
+        rows.append((name, var_ip, var_interval))
 
     inner.bind("<Configure>", lambda e: canv.configure(scrollregion=canv.bbox("all")))
 
@@ -235,11 +291,19 @@ def open_bind_ip_ui(root_win: tk.Tk, sensor_states: dict):
         new_map = _load_sensor_map_json()
         changed = []  
 
-        for name, var_ip in rows:
+        for name, var_ip, var_interval in rows:
             ip = var_ip.get().strip()
             if ip:
-                new_map[name] = {"by": "ip", "value": ip}
-                changed.append((name, ip))  
+                try:
+                    interval = int(var_interval.get().strip() or "10")
+                except Exception:
+                    messagebox.showerror("Invalid interval", f"{name}: interval must be an integer number of seconds.")
+                    return
+                if interval < 1:
+                    messagebox.showerror("Invalid interval", f"{name}: interval must be >= 1.")
+                    return
+                new_map[name] = {"by": "ip", "value": ip, "interval": interval}
+                changed.append((name, ip, interval))  
             else:
                 if name in new_map:
                     del new_map[name]
@@ -247,8 +311,8 @@ def open_bind_ip_ui(root_win: tk.Tk, sensor_states: dict):
         _save_sensor_map_json(new_map)
 
         if auto_start_var.get():
-            from smartmeter import start_logger, csv_path_for_device
-            for sensor_name, ip in changed:
+            from app.hardware.smartmeter import start_logger, csv_path_for_device
+            for sensor_name, ip, interval in changed:
                 try:
                     display_name = _smart_meter_display_name(sensor_name, sensor_states)
                     if display_name == _normalize_device_label(sensor_name):
@@ -259,7 +323,7 @@ def open_bind_ip_ui(root_win: tk.Tk, sensor_states: dict):
                     start_logger(
                         device_name=display_name,
                         ip=ip,
-                        interval=60,
+                        interval=interval,
                         device_id=sensor_name,
                         csv_path=csv_path_for_device(sensor_name),
                     )
@@ -274,49 +338,121 @@ def open_bind_ip_ui(root_win: tk.Tk, sensor_states: dict):
     tk.Button(btns, text="Save", command=_save_and_close).pack(side="right")
     tk.Button(btns, text="Close", command=win.destroy).pack(side="right", padx=8)
 
-# ---------- DHT22 (GPIO) ----------
+# ---------- DHT / PIR / Switch / Weight (GPIO) ----------
 
-def open_bind_dht_ui(root_win: tk.Tk, sensor_states: dict):
-    """
-    Associate 'Temperature' sensors to a local DHT on GPIO (BCM numbering).
-    Persist as: {"sensor_name":{"by":"dht","gpio":4}} and optionally auto-start logger.
-    """
-    def _is_temp(name: str) -> bool:
-        return _sensor_type(name, sensor_states) == "Temperature"
+GPIO_BINDABLE_TYPES = ("Temperature", "PIR", "Switch", "Weight")
 
-    names = [n for n in _all_sensor_names(sensor_states) if _is_temp(n)]
+
+def _binding_kind_for_type(sensor_type: str) -> str:
+    return {
+        "Temperature": "dht",
+        "PIR": "pir",
+        "Switch": "switch",
+        "Weight": "weight",
+    }.get(sensor_type, "sensor")
+
+
+def _supports_gpio_line_options(sensor_type: str) -> bool:
+    return sensor_type in ("PIR", "Switch", "Weight")
+
+
+def open_bind_gpio_sensors_ui(root_win: tk.Tk, sensor_states: dict):
+    """
+    Associate DHT, PIR, Switch, and Weight sensors to local GPIO pins (BCM numbering).
+    Temperature sensors are persisted as {"by":"dht","kind":"dht","gpio":4}.
+    Other GPIO sensors are persisted as {"by":"gpio","kind":"pir","gpio":17}.
+    """
+    names = [
+        n for n in _all_sensor_names(sensor_states)
+        if (_sensor_type(n, sensor_states) in GPIO_BINDABLE_TYPES)
+    ]
     current = _load_sensor_map_json()
 
     win = tk.Toplevel(root_win)
-    win.title("Bind DHT22 (GPIO → sensor)")
-    win.geometry("520x420")
+    win.title("Bind GPIO sensors")
+    win.geometry("760x520")
 
-    frm = tk.Frame(win); frm.pack(fill="both", expand=True, padx=10, pady=10)
-    tk.Label(frm, text="Sensor (Temperature)", width=30, anchor="w").grid(row=0, column=0, sticky="w")
-    tk.Label(frm, text="GPIO (BCM)", width=12, anchor="w").grid(row=0, column=1, sticky="w")
+    container = tk.Frame(win)
+    container.pack(fill="both", expand=True, padx=10, pady=10)
+    canv = tk.Canvas(container)
+    canv.pack(side="left", fill="both", expand=True)
+    vsb = tk.Scrollbar(container, orient="vertical", command=canv.yview)
+    vsb.pack(side="right", fill="y")
+    canv.configure(yscrollcommand=vsb.set)
+    inner = tk.Frame(canv)
+    canv.create_window((0, 0), window=inner, anchor="nw")
+
+    column_specs = [
+        (0, 260, "Sensor"),
+        (1, 110, "Type"),
+        (2, 140, "GPIO (BCM)"),
+        (3, 140, "Interval (s)"),
+        (4, 90, "Pull-up"),
+        (5, 110, "Active low"),
+    ]
+    for col, minsize, title in column_specs:
+        inner.grid_columnconfigure(col, minsize=minsize)
+        tk.Label(inner, text=title, anchor="w", font=("Helvetica", 10, "bold")).grid(
+            row=0,
+            column=col,
+            sticky="ew",
+            padx=(0, 12) if col < 5 else 0,
+            pady=(0, 8),
+        )
 
     rows = []
-    for i, name in enumerate(names, start=1):
-        tk.Label(frm, text=name, width=30, anchor="w").grid(row=i, column=0, sticky="w")
-        init_gpio = ""
-        v = current.get(name)
-        if isinstance(v, dict) and v.get("by") == "dht":
-            init_gpio = str(v.get("gpio") or "")
-        var = tk.StringVar(value=init_gpio)
-        tk.Entry(frm, textvariable=var, width=12).grid(row=i, column=1, sticky="w")
-        rows.append((name, var))
+    for row_idx, name in enumerate(names, start=1):
+        sensor_type = _sensor_type(name, sensor_states) or ""
+        kind = _binding_kind_for_type(sensor_type)
+        supports_line_options = _supports_gpio_line_options(sensor_type)
+        tk.Label(inner, text=name, anchor="w").grid(row=row_idx, column=0, sticky="ew", padx=(0, 12), pady=4)
+        tk.Label(inner, text=sensor_type, anchor="w").grid(row=row_idx, column=1, sticky="ew", padx=(0, 12), pady=4)
 
-    bottom = tk.Frame(win); bottom.pack(fill="x", padx=10, pady=(6,10))
+        init_gpio = ""
+        init_interval = "10"
+        init_pull_up = False
+        init_active_low = False
+        cfg = current.get(name)
+        if isinstance(cfg, dict) and cfg.get("by") in ("dht", "gpio"):
+            init_gpio = str(cfg.get("gpio") or "")
+            init_interval = str(cfg.get("interval") or "10")
+            if supports_line_options:
+                init_pull_up = bool(cfg.get("pull_up", False))
+                init_active_low = bool(cfg.get("active_low", False))
+
+        gpio_var = tk.StringVar(value=init_gpio)
+        interval_var = tk.StringVar(value=init_interval)
+        pull_up_var = tk.BooleanVar(value=init_pull_up)
+        active_low_var = tk.BooleanVar(value=init_active_low)
+
+        tk.Entry(inner, textvariable=gpio_var, width=12).grid(row=row_idx, column=2, sticky="ew", padx=(0, 12), pady=4)
+        tk.Entry(inner, textvariable=interval_var, width=12).grid(row=row_idx, column=3, sticky="ew", padx=(0, 12), pady=4)
+        line_state = "normal" if supports_line_options else "disabled"
+        tk.Checkbutton(inner, variable=pull_up_var, state=line_state).grid(row=row_idx, column=4, sticky="w", padx=(8, 12), pady=4)
+        tk.Checkbutton(inner, variable=active_low_var, state=line_state).grid(row=row_idx, column=5, sticky="w", padx=(8, 0), pady=4)
+        rows.append((name, sensor_type, kind, supports_line_options, gpio_var, interval_var, pull_up_var, active_low_var))
+
+    if not names:
+        tk.Label(
+            inner,
+            text="No Temperature, PIR, Switch, or Weight sensors found in the current scenario.",
+            anchor="w",
+        ).grid(row=1, column=0, columnspan=6, sticky="ew", pady=12)
+
+    inner.bind("<Configure>", lambda e: canv.configure(scrollregion=canv.bbox("all")))
+
+    bottom = tk.Frame(win)
+    bottom.pack(fill="x", padx=10, pady=(6, 10))
     autostart = tk.BooleanVar(value=True)
-    tk.Checkbutton(bottom, text="Auto-start DHT logger for associated GPIO", variable=autostart).pack(side="left")
+    tk.Checkbutton(bottom, text="Auto-start GPIO loggers", variable=autostart).pack(side="left")
 
     def _save():
         m = _load_sensor_map_json()
         started = []
-        for name, var in rows:
-            txt = var.get().strip()
+        for name, sensor_type, kind, supports_line_options, gpio_var, interval_var, pull_up_var, active_low_var in rows:
+            txt = gpio_var.get().strip()
             if not txt:
-                if name in m and (m.get(name) or {}).get("by") == "dht":
+                if name in m and (m.get(name) or {}).get("by") in ("dht", "gpio"):
                     del m[name]
                 continue
             try:
@@ -324,17 +460,46 @@ def open_bind_dht_ui(root_win: tk.Tk, sensor_states: dict):
             except Exception:
                 messagebox.showerror("Invalid GPIO", f"{name}: '{txt}' is not a number.")
                 return
-            m[name] = {"by": "dht", "gpio": gpio}
+            try:
+                interval = int(interval_var.get().strip() or "10")
+            except Exception:
+                messagebox.showerror("Invalid interval", f"{name}: interval must be an integer number of seconds.")
+                return
+            if interval < 1:
+                messagebox.showerror("Invalid interval", f"{name}: interval must be >= 1.")
+                return
+
+            pull_up = bool(pull_up_var.get()) if supports_line_options else False
+            active_low = bool(active_low_var.get()) if supports_line_options else False
+            by = "dht" if kind == "dht" else "gpio"
+            m[name] = {
+                "by": by,
+                "kind": kind,
+                "type": sensor_type,
+                "gpio": gpio,
+                "interval": interval,
+                "pull_up": pull_up,
+                "active_low": active_low,
+            }
             if autostart.get():
                 try:
-                    from dhtlogger import start_dht_logger
-                    start_dht_logger(sensor_label=name, gpio=gpio, interval=60)
+                    from app.hardware.real_sensors import start_bound_logger
+
+                    start_bound_logger(
+                        sensor_label=name,
+                        kind=kind,
+                        gpio=gpio,
+                        interval=interval,
+                        pull_up=pull_up,
+                        active_low=active_low,
+                    )
                     started.append((name, gpio))
                 except Exception as e:
-                    logger.warning("Cannot start DHT logger on GPIO %s: %s", gpio, e)
+                    logger.warning("Cannot start %s logger on GPIO %s: %s", kind, gpio, e)
+
         _save_sensor_map_json(m)
         if started:
-            logger.info("[DHT] loggers started: %s", started)
+            logger.info("[GPIO] loggers started: %s", started)
         win.destroy()
 
     tk.Button(bottom, text="Save", command=_save).pack(side="right")

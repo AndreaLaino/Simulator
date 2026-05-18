@@ -25,7 +25,7 @@ def _is_real_temperature_sensor(sensor_name: str, logs_dir: str = "devices") -> 
 
     ok = False
     try:
-        from dhtlogger import load_temp_by_label_any_csv, load_temp_by_gpio_any_csv
+        from app.hardware.real_sensors import load_temp_by_gpio_any_csv, load_temp_by_label_any_csv
 
         # 1) label lookup
         df = None

@@ -126,7 +126,11 @@ class TimerApp:
 
     def _update_speed_buttons(self):
         active_bg = "#cfe8cf"
-        inactive_bg = "SystemButtonFace"
+        # Use the timer frame background as the inactive button background so it's portable
+        try:
+            inactive_bg = self.timer_frame.cget("bg")
+        except Exception:
+            inactive_bg = "lightgrey"
         self.speed_1x_button.config(bg=active_bg if self.advance_speed == 1 else inactive_bg)
         self.speed_2x_button.config(bg=active_bg if self.advance_speed == 2 else inactive_bg)
         self.speed_5x_button.config(bg=active_bg if self.advance_speed == 5 else inactive_bg)

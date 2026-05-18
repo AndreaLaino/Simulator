@@ -85,6 +85,9 @@ def start_sim(ctx: AppContext):
             lambda event: interaction(ctx.canvas, timer_app_instance, event, ctx.activity_label, ctx.house_state, runtime_sources),
         )
 
+    # Ensure the name exists in the closure for lambdas below
+    timer_app_instance = None
+
     timer_app_instance = TimerApp(
         ctx.timer_frame,
         start_callback=lambda: (
@@ -149,6 +152,18 @@ def exit_app(ctx: AppContext):
                 logger.info("[SmartMeter] logging stopped")
         except Exception as e:
             logger.warning("Stopping SmartMeterLogger failed: %s", e)
+        for module_name, label in (
+            ("app.hardware.smartmeter", "SmartMeter"),
+            ("app.hardware.real_sensors", "GPIO/DHT sensor"),
+        ):
+            try:
+                module = __import__(module_name, fromlist=["stop_all"])
+                stop_all = getattr(module, "stop_all", None)
+                if callable(stop_all):
+                    stop_all()
+                    logger.info("[%s] loggers stopped", label)
+            except Exception as e:
+                logger.warning("Stopping %s loggers failed: %s", label, e)
         ctx.window.quit()
 
 __all__ = ["start_sim", "enable_all_menus", "exit_app"]

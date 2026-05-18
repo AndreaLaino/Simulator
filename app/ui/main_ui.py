@@ -25,7 +25,7 @@ from app.io.scenario import (
     import_csv,
     import_csv_from_s3,
 )
-from app.ui.bindings import open_bind_ip_ui, open_bind_dht_ui
+from app.ui.bindings import open_bind_gpio_sensors_ui, open_bind_ip_ui
 from app.controllers.llm_smartmeter import open_llm_smartmeter_ui
 
 
@@ -185,8 +185,8 @@ def build_home_ui(ctx: AppContext):
     sim_menu.add_command(label="Import sensor CSV (local)", command=lambda: import_csv(ctx.window))
     sim_menu.add_command(label="Export simulations (CSV)", command=lambda: export_simulation_csv())
     sim_menu.add_separator()
-    sim_menu.add_command(label="Bind Smart Meter (IP → sensor)", command=lambda: open_bind_ip_ui(ctx.window, _sensor_store(ctx)))
-    sim_menu.add_command(label="Bind DHT22 (GPIO → sensor)", command=lambda: open_bind_dht_ui(ctx.window, _sensor_store(ctx)))
+    sim_menu.add_command(label="Bind by IP", command=lambda: open_bind_ip_ui(ctx.window, _sensor_store(ctx)))
+    sim_menu.add_command(label="Bind by GPIO", command=lambda: open_bind_gpio_sensors_ui(ctx.window, _sensor_store(ctx)))
 
 
 

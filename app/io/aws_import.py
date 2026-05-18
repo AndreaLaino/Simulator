@@ -408,17 +408,17 @@ class AWSS3ImportUI:
             self.status_label.config(text="Download failed ✗", fg="red")
     
     def _download_to_file(self):
-        from tkinter import filedialog
-        
+        from app.io.safe_dialog import ask_save_file
+
         if not self.importer or not self.selected_bucket or not self.selected_file:
             messagebox.showwarning("Selection Required", "Please select a bucket and file.")
             return
-        
-        local_path = filedialog.asksaveasfilename(
+
+        local_path = ask_save_file(
             title="Save As",
             defaultextension=".csv",
             initialfile=self.selected_file,
-            filetypes=[("CSV files", "*.csv"), ("JSON files", "*.json"), ("All files", "*.*")]
+            filetypes=[("CSV files", "*.csv"), ("JSON files", "*.json"), ("All files", "*.*")],
         )
         
         if not local_path:

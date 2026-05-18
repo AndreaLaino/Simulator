@@ -12,7 +12,7 @@ import math
 import pickle
 from pathlib import Path
 from bisect import bisect_right
-from dhtlogger import load_temp_by_label_any_csv, load_temp_by_gpio_any_csv
+from app.hardware.real_sensors import load_temp_by_gpio_any_csv, load_temp_by_label_any_csv
 import pandas as pd
 from collections import deque
 from typing import Optional
